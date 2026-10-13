@@ -1,9 +1,13 @@
-import { Controller, Get, Post, Delete, Body, Param } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
+import { Controller, Get, Post, Delete, Body, Param, UseGuards } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiBearerAuth } from '@nestjs/swagger';
 import { ComplianceService } from './compliance.service';
 import { AddSuppressionDto } from './dto/add-suppression.dto';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { UserRole } from '../../common/enums';
 
 @ApiTags('Compliance & Suppression')
+@ApiBearerAuth()
+@Roles(UserRole.GROUP_ADMIN)
 @Controller('api/compliance')
 export class ComplianceController {
   constructor(private readonly complianceService: ComplianceService) {}

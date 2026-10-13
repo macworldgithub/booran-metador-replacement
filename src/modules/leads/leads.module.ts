@@ -5,10 +5,13 @@ import { ComplianceModule } from '../compliance/compliance.module';
 import { JourneyModule } from '../journey/journey.module';
 import { WritebackModule } from '../writeback/writeback.module';
 
+import { AdfParserService } from './adf/adf-parser.service';
+import { AdfIntakeController } from './adf/adf-intake.controller';
+
 @Module({
   imports: [ComplianceModule, JourneyModule, WritebackModule],
-  controllers: [LeadsController],
-  providers: [LeadsService],
-  exports: [LeadsService],
+  controllers: [LeadsController, AdfIntakeController],
+  providers: [LeadsService, AdfParserService],
+  exports: [LeadsService, AdfParserService],
 })
 export class LeadsModule {}

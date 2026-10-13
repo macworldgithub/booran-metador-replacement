@@ -1,17 +1,39 @@
 import { Injectable, Logger } from '@nestjs/common';
+import axios, { AxiosInstance } from 'axios';
 import { StoreService } from '../database/store.service';
 import { WritebackLogEntity } from '../database/entities';
 
 @Injectable()
 export class WritebackService {
   private readonly logger = new Logger(WritebackService.name);
+  private readonly httpClient: AxiosInstance;
+  private readonly isConfigured: boolean;
 
-  constructor(private readonly store: StoreService) {}
+  constructor(private readonly store: StoreService) {
+    const baseUrl = process.env.DS_API_BASE_URL || 'https://api.dealersocket.com';
+    const clientId = process.env.DS_CLIENT_ID;
+    const clientSecret = process.env.DS_CLIENT_SECRET;
 
-  /**
-   * Enqueues an activity/work-note write-back to DealerSocket.
-   * CRM API calls are asynchronous and never block live SMS delivery.
-   */
+    this.isConfigured = !!(clientId && clientSecret && !clientId.startsWith('xxx'));
+
+    this.httpClient = axios.create({
+      baseURL: baseUrl,
+      timeout: 10000,
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+    });
+
+    if (this.isConfigured) {
+      this.logger.log(`DealerSocket Solera API client configured (${baseUrl})`);
+    } else {
+      this.logger.log(
+        'DealerSocket credentials not provided. Write-back service running in simulation mode with full persistent audit trail.',
+      );
+    }
+  }
+
   async queueWriteback(
     prospectId: string,
     opportunityId: string,
@@ -31,9 +53,9 @@ export class WritebackService {
       createdAt: new Date(),
     };
 
-    this.store.addWritebackLog(log);
+    await this.store.addWritebackLog(log);
 
-    // Simulate immediate asynchronous background dispatch to DealerSocket API
+    // Fire-and-forget async background dispatch (never blocks SMS or inbound processing)
     this.executeDealerSocketSync(log).catch((err) => {
       this.logger.error(`DealerSocket write-back failed for log ${log.id}: ${err.message}`);
     });
@@ -41,25 +63,55 @@ export class WritebackService {
     return log;
   }
 
-  private async executeDealerSocketSync(log: WritebackLogEntity): Promise<void> {
-    // In production, this calls DealerSocket Solera Work-Note / Activity API.
-    // Simulating successful write-back
-    this.logger.log(
-      `[DealerSocket Write-Back Sync] Opportunity #${log.opportunityId} -> Action: ${log.action} | Detail: "${log.payload}"`,
-    );
+  async executeDealerSocketSync(log: WritebackLogEntity): Promise<void> {
+    if (this.isConfigured) {
+      try {
+        // DealerSocket Solera API call: POST /v1/opportunities/{id}/events or /v1/events
+        const res = await this.httpClient.post(
+          `/v1/opportunities/${encodeURIComponent(log.opportunityId)}/notes`,
+          {
+            type: 'SMS_ACTIVITY',
+            action: log.action,
+            note: log.payload,
+            timestamp: new Date().toISOString(),
+          },
+          {
+            headers: {
+              'X-Client-Id': process.env.DS_CLIENT_ID,
+              'X-Client-Secret': process.env.DS_CLIENT_SECRET,
+            },
+          },
+        );
 
-    this.store.updateWritebackLog(log.id, 'success');
+        this.logger.log(
+          `[DealerSocket Write-Back Synced] Opp #${log.opportunityId} → Status ${res.status}`,
+        );
+        await this.store.updateWritebackLog(log.id, 'success');
+        return;
+      } catch (err: any) {
+        this.logger.warn(
+          `DealerSocket API error for Opp #${log.opportunityId}: ${err.message}. Marking failed for retry.`,
+        );
+        await this.store.updateWritebackLog(log.id, 'failed', err.message);
+        throw err;
+      }
+    }
+
+    // Simulation mode: records success in MongoDB
+    this.logger.log(
+      `[DealerSocket Write-Back (Simulated)] Opp #${log.opportunityId} → Action: ${log.action} | "${log.payload}"`,
+    );
+    await this.store.updateWritebackLog(log.id, 'success');
   }
 
-  getLogs(status?: 'pending' | 'success' | 'failed'): WritebackLogEntity[] {
+  async getLogs(status?: 'pending' | 'success' | 'failed'): Promise<WritebackLogEntity[]> {
     return this.store.getWritebackLogs(status);
   }
 
-  async retryLog(logId: string): Promise<WritebackLogEntity | undefined> {
-    const logs = this.store.getWritebackLogs();
+  async retryLog(logId: string): Promise<WritebackLogEntity | null> {
+    const logs = await this.store.getWritebackLogs();
     const log = logs.find((l) => l.id === logId);
-    if (!log) return undefined;
-
+    if (!log) return null;
     await this.executeDealerSocketSync(log);
     return log;
   }

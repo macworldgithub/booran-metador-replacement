@@ -7,17 +7,17 @@ import { SuppressionEntity } from '../database/entities';
 export class ComplianceService {
   constructor(private readonly store: StoreService) {}
 
-  isMobileSuppressed(rawMobile: string): boolean {
+  async isMobileSuppressed(rawMobile: string): Promise<boolean> {
     const norm = PhoneNormalizer.normalizeAustralianPhone(rawMobile);
     const lookupKey = norm.normalized || rawMobile;
     return this.store.isSuppressed(lookupKey);
   }
 
-  addSuppression(
+  async addSuppression(
     rawMobile: string,
     reason: string,
     source: 'keyword_opt_out' | 'manual_admin' | 'crm_flag' = 'manual_admin',
-  ): SuppressionEntity {
+  ): Promise<SuppressionEntity> {
     const norm = PhoneNormalizer.normalizeAustralianPhone(rawMobile);
     if (!norm.isValid || !norm.normalized) {
       throw new BadRequestException(`Invalid Australian mobile number: ${rawMobile}`);
@@ -25,22 +25,23 @@ export class ComplianceService {
     return this.store.addSuppression(norm.normalized, reason, source);
   }
 
-  removeSuppression(rawMobile: string): boolean {
+  async removeSuppression(rawMobile: string): Promise<boolean> {
     const norm = PhoneNormalizer.normalizeAustralianPhone(rawMobile);
     const key = norm.normalized || rawMobile;
     return this.store.removeSuppression(key);
   }
 
-  getAllSuppressions(): SuppressionEntity[] {
+  async getAllSuppressions(): Promise<SuppressionEntity[]> {
     return this.store.getSuppressionList();
   }
 
-  getAuditLog() {
+  async getAuditLog() {
+    const suppressions = await this.store.getSuppressionList();
     return {
       generatedAt: new Date().toISOString(),
       complianceStandard: 'Spam Act 2003 / ACMA Compliant',
-      totalSuppressedNumbers: this.store.getSuppressionList().length,
-      suppressions: this.store.getSuppressionList(),
+      totalSuppressedNumbers: suppressions.length,
+      suppressions,
     };
   }
 }
