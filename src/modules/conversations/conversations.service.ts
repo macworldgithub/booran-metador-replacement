@@ -7,6 +7,7 @@ import {
   ThreadEventType,
   ProspectStatus,
   ProspectOutcome,
+  RooftopId,
 } from '../../common/enums';
 import {
   QueryProspectsDto,
@@ -26,44 +27,42 @@ export class ConversationsService {
     private readonly writebackService: WritebackService,
   ) {}
 
-  getProspects(query: QueryProspectsDto) {
+  async getProspects(query: QueryProspectsDto, scopedRooftopIds?: RooftopId[]) {
     return this.store.queryProspects({
       rooftopId: query.rooftopId,
+      // RBAC scope: if caller is not group_admin, restrict to their rooftops
+      rooftopIds: !query.rooftopId && scopedRooftopIds ? scopedRooftopIds : undefined,
       status: query.status,
       ownerName: query.ownerName,
       search: query.search,
     });
   }
 
-  getProspectById(id: string) {
-    const prospect = this.store.findProspectById(id);
-    if (!prospect) {
-      throw new NotFoundException(`Prospect ${id} not found`);
-    }
+  async getProspectById(id: string) {
+    const prospect = await this.store.findProspectById(id);
+    if (!prospect) throw new NotFoundException(`Prospect ${id} not found`);
 
-    // Clear unread inbound count when thread is opened in portal
+    // Clear unread badge when thread is opened
     if (prospect.unreadInboundCount > 0) {
-      this.store.updateProspect(id, { unreadInboundCount: 0 });
+      await this.store.updateProspect(id, { unreadInboundCount: 0 });
     }
 
     return prospect;
   }
 
-  getThread(prospectId: string) {
-    const prospect = this.getProspectById(prospectId);
-    const events = this.store.getEventsByProspectId(prospectId);
-
+  async getThread(prospectId: string) {
+    const prospect = await this.getProspectById(prospectId);
+    const events = await this.store.getEventsByProspectId(prospectId);
     return {
       prospect,
       totalEvents: events.length,
-      events, // strictly ordered chronologically
+      events,
     };
   }
 
   async sendStaffMessage(prospectId: string, dto: SendStaffMessageDto) {
-    const prospect = this.getProspectById(prospectId);
+    const prospect = await this.getProspectById(prospectId);
 
-    // Send SMS via rooftop number
     const event = await this.smsService.sendOutboundSms({
       prospect,
       content: dto.content,
@@ -71,7 +70,6 @@ export class ConversationsService {
       authorName: dto.authorName,
     });
 
-    // Write back to DealerSocket
     await this.writebackService.queueWriteback(
       prospect.id,
       prospect.dealerSocketOpportunityId,
@@ -82,10 +80,10 @@ export class ConversationsService {
     return event;
   }
 
-  addInternalNote(prospectId: string, dto: AddInternalNoteDto) {
-    const prospect = this.getProspectById(prospectId);
+  async addInternalNote(prospectId: string, dto: AddInternalNoteDto) {
+    const prospect = await this.getProspectById(prospectId);
 
-    const noteEvent = this.store.addEvent({
+    return this.store.addEvent({
       id: `note_${Date.now()}`,
       prospectId: prospect.id,
       type: ThreadEventType.INTERNAL_NOTE,
@@ -94,27 +92,21 @@ export class ConversationsService {
       authorName: dto.authorName,
       timestamp: new Date(),
     });
-
-    return noteEvent;
   }
 
-  updateJourney(prospectId: string, dto: UpdateJourneyDto) {
-    return this.journeyService.manageJourney(
-      prospectId,
-      dto.action,
-      dto.reason,
-    );
+  async updateJourney(prospectId: string, dto: UpdateJourneyDto) {
+    return this.journeyService.manageJourney(prospectId, dto.action, dto.reason);
   }
 
   async setOutcome(prospectId: string, dto: SetOutcomeDto) {
-    const prospect = this.getProspectById(prospectId);
+    const prospect = await this.getProspectById(prospectId);
 
-    let newStatus = ProspectStatus.CLOSED;
-    if (dto.outcome === ProspectOutcome.APPOINTMENT_REQUESTED) {
-      newStatus = ProspectStatus.WAITING_ON_US;
-    }
+    const newStatus =
+      dto.outcome === ProspectOutcome.APPOINTMENT_REQUESTED
+        ? ProspectStatus.WAITING_ON_US
+        : ProspectStatus.CLOSED;
 
-    const updated = this.store.updateProspect(prospectId, {
+    const updated = await this.store.updateProspect(prospectId, {
       outcome: dto.outcome,
       status: newStatus,
       journey: {
@@ -124,8 +116,7 @@ export class ConversationsService {
       },
     });
 
-    // Add system event
-    this.store.addEvent({
+    await this.store.addEvent({
       id: `sys_${Date.now()}`,
       prospectId,
       type: ThreadEventType.SYSTEM,
@@ -134,7 +125,6 @@ export class ConversationsService {
       timestamp: new Date(),
     });
 
-    // Write-back outcome to DealerSocket
     await this.writebackService.queueWriteback(
       prospect.id,
       prospect.dealerSocketOpportunityId,
@@ -145,17 +135,14 @@ export class ConversationsService {
     return updated;
   }
 
-  assignProspect(prospectId: string, dto: AssignProspectDto) {
-    const prospect = this.getProspectById(prospectId);
+  async assignProspect(prospectId: string, dto: AssignProspectDto) {
+    await this.getProspectById(prospectId);
 
-    const updated = this.store.updateProspect(prospectId, {
-      assignedTo: {
-        name: dto.salespersonName,
-        email: dto.salespersonEmail,
-      },
+    const updated = await this.store.updateProspect(prospectId, {
+      assignedTo: { name: dto.salespersonName, email: dto.salespersonEmail },
     });
 
-    this.store.addEvent({
+    await this.store.addEvent({
       id: `sys_${Date.now()}`,
       prospectId,
       type: ThreadEventType.SYSTEM,

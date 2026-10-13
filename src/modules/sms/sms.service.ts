@@ -15,6 +15,8 @@ import {
 } from '../../common/enums';
 import { ThreadEventEntity, ProspectEntity } from '../database/entities';
 
+import twilio from 'twilio';
+
 export interface SendSmsOptions {
   prospect: ProspectEntity;
   content: string;
@@ -26,65 +28,81 @@ export interface SendSmsOptions {
 @Injectable()
 export class SmsService {
   private readonly logger = new Logger(SmsService.name);
+  private readonly twilioClient?: twilio.Twilio;
 
   constructor(
     private readonly store: StoreService,
     private readonly complianceService: ComplianceService,
-  ) {}
+  ) {
+    const accountSid = process.env.TWILIO_ACCOUNT_SID;
+    const authToken = process.env.TWILIO_AUTH_TOKEN;
 
-  /**
-   * Calculates GSM character count and segment count for the composer UI.
-   */
+    if (accountSid && authToken && !accountSid.startsWith('ACxxx')) {
+      try {
+        this.twilioClient = twilio(accountSid, authToken);
+        this.logger.log('Twilio SMS client initialized successfully');
+      } catch (err: any) {
+        this.logger.warn(`Failed to initialize Twilio client: ${err.message}`);
+      }
+    } else {
+      this.logger.log('Twilio credentials not configured. Running SMS service in simulation mode.');
+    }
+  }
+
   calculateSegments(text: string) {
     const isUnicode = /[^\u0000-\u007F]/.test(text);
     const charCount = text.length;
-
-    let segmentLimit = 160;
-    let multiLimit = 153;
-
-    if (isUnicode) {
-      segmentLimit = 70;
-      multiLimit = 67;
-    }
-
+    const segmentLimit = isUnicode ? 70 : 160;
+    const multiLimit = isUnicode ? 67 : 153;
     const segments =
       charCount === 0
         ? 1
         : charCount <= segmentLimit
           ? 1
           : Math.ceil(charCount / multiLimit);
-
-    return {
-      charCount,
-      segments,
-      isUnicode,
-      maxSingleSegment: segmentLimit,
-    };
+    return { charCount, segments, isUnicode, maxSingleSegment: segmentLimit };
   }
 
-  /**
-   * Sends an SMS message to a customer prospect, ensuring Spam Act compliance.
-   */
   async sendOutboundSms(options: SendSmsOptions): Promise<ThreadEventEntity> {
     const { prospect, content, type, authorName, journeyStepName } = options;
 
-    // Check suppression list across all 3 rooftops
-    if (this.complianceService.isMobileSuppressed(prospect.normalizedMobile)) {
-      this.logger.warn(
-        `Blocked send to suppressed mobile ${prospect.normalizedMobile}`,
-      );
+    // Suppression check
+    const suppressed = await this.complianceService.isMobileSuppressed(prospect.normalizedMobile);
+    if (suppressed) {
+      this.logger.warn(`Blocked send to suppressed mobile ${prospect.normalizedMobile}`);
       throw new BadRequestException(
         `Mobile ${prospect.normalizedMobile} is in the 3-rooftop suppression list`,
       );
     }
 
     const rooftop = this.store.getRooftopById(prospect.rooftopId);
-    if (!rooftop) {
-      throw new NotFoundException(`Rooftop not found: ${prospect.rooftopId}`);
+    if (!rooftop) throw new NotFoundException(`Rooftop not found: ${prospect.rooftopId}`);
+
+    let externalSid: string | undefined;
+    let initialStatus = DeliveryStatus.DELIVERED;
+
+    // Dispatch via real Twilio if credentials configured
+    if (this.twilioClient) {
+      try {
+        const message = await this.twilioClient.messages.create({
+          body: content,
+          from: rooftop.senderPhone,
+          to: prospect.normalizedMobile,
+          statusCallback: process.env.TWILIO_STATUS_CALLBACK_URL || undefined,
+        });
+        externalSid = message.sid;
+        initialStatus = DeliveryStatus.PENDING;
+        this.logger.log(`Twilio message created [SID: ${message.sid}] status: ${message.status}`);
+      } catch (twilioErr: any) {
+        this.logger.error(
+          `Twilio send failed to ${prospect.normalizedMobile}: ${twilioErr.message}`,
+          twilioErr.stack,
+        );
+        initialStatus = DeliveryStatus.FAILED;
+      }
     }
 
     const eventId = `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-
     const event: ThreadEventEntity = {
       id: eventId,
       prospectId: prospect.id,
@@ -93,23 +111,24 @@ export class SmsService {
       content,
       authorName,
       journeyStepName,
-      deliveryStatus: DeliveryStatus.DELIVERED, // Simulated carrier delivery
+      deliveryStatus: initialStatus,
       timestamp: new Date(),
       metadata: {
         from: rooftop.senderPhone,
         to: prospect.normalizedMobile,
         rooftopName: rooftop.name,
+        twilioMessageSid: externalSid,
       },
     };
 
-    this.store.addEvent(event);
+    await this.store.addEvent(event);
     this.logger.log(
       `[SMS OUT] ${rooftop.name} -> ${prospect.normalizedMobile} (${type}): "${content}"`,
     );
 
-    // If staff sent from portal, pause automated journey per Scope 7.2
+    // Staff send → pause automated journey (Scope §7.2)
     if (type === ThreadEventType.STAFF_OUTBOUND) {
-      this.store.updateProspect(prospect.id, {
+      await this.store.updateProspect(prospect.id, {
         status: ProspectStatus.WAITING_ON_CUSTOMER,
         journey: {
           ...prospect.journey,
@@ -118,8 +137,7 @@ export class SmsService {
         },
       });
 
-      // Also log system event on thread
-      this.store.addEvent({
+      await this.store.addEvent({
         id: `sys_${Date.now()}`,
         prospectId: prospect.id,
         type: ThreadEventType.SYSTEM,
@@ -132,10 +150,6 @@ export class SmsService {
     return event;
   }
 
-  /**
-   * Processes an incoming SMS from a customer carrier webhook.
-   * Matches lead, checks opt-out keywords (STOP), and updates the chronological thread.
-   */
   async processInboundSms(
     from: string,
     to: string,
@@ -147,21 +161,20 @@ export class SmsService {
       throw new BadRequestException(`Invalid Australian sender phone: ${from}`);
     }
 
-    // Identify rooftop from the destination number
     const targetRooftop = this.store.getRooftopBySenderPhone(to);
     const rooftopId = targetRooftop ? targetRooftop.id : RooftopId.CRANBOURNE_KIA;
 
-    // Find the prospect thread
-    let prospect = this.store.findRecentProspectByMobileAndRooftop(
+    // Find prospect within 30-day window
+    let prospect = await this.store.findRecentProspectByMobileAndRooftop(
       normFrom.normalized,
       rooftopId,
       30,
     );
 
+    // Fallback: search across rooftops
     if (!prospect) {
-      // Find by mobile across rooftops if not found in 30 days
-      const allProspects = this.store.queryProspects({ search: normFrom.normalized });
-      prospect = allProspects[0];
+      const allProspects = await this.store.queryProspects({ search: normFrom.normalized });
+      prospect = allProspects[0] || null;
     }
 
     if (!prospect) {
@@ -173,14 +186,12 @@ export class SmsService {
     const isOptOut = PhoneNormalizer.isOptOutKeyword(body);
 
     if (isOptOut) {
-      // Action Spam Act opt-out across ALL 3 rooftops
-      this.complianceService.addSuppression(
+      await this.complianceService.addSuppression(
         normFrom.normalized,
         `Opt-out keyword received: ${body.trim()}`,
         'keyword_opt_out',
       );
 
-      // 1. Add inbound event
       const inboundEvent: ThreadEventEntity = {
         id: `evt_in_${Date.now()}`,
         prospectId: prospect.id,
@@ -190,10 +201,9 @@ export class SmsService {
         mediaUrls,
         timestamp: new Date(),
       };
-      this.store.addEvent(inboundEvent);
+      await this.store.addEvent(inboundEvent);
 
-      // 2. Add system event
-      this.store.addEvent({
+      await this.store.addEvent({
         id: `sys_${Date.now()}`,
         prospectId: prospect.id,
         type: ThreadEventType.SYSTEM,
@@ -202,8 +212,7 @@ export class SmsService {
         timestamp: new Date(),
       });
 
-      // 3. Update prospect status
-      this.store.updateProspect(prospect.id, {
+      await this.store.updateProspect(prospect.id, {
         status: ProspectStatus.OPTED_OUT,
         journey: {
           ...prospect.journey,
@@ -212,10 +221,9 @@ export class SmsService {
         },
       });
 
-      // 4. Send single confirmation SMS as required by Scope 7.2 & 11
       const rooftop = this.store.getRooftopById(prospect.rooftopId);
       const rooftopName = rooftop ? rooftop.name : 'Dealership';
-      const confirmEvent: ThreadEventEntity = {
+      await this.store.addEvent({
         id: `evt_optout_conf_${Date.now()}`,
         prospectId: prospect.id,
         type: ThreadEventType.AUTOMATED_OUTBOUND,
@@ -224,14 +232,12 @@ export class SmsService {
         journeyStepName: 'Opt-out Confirmation',
         deliveryStatus: DeliveryStatus.DELIVERED,
         timestamp: new Date(),
-      };
-      this.store.addEvent(confirmEvent);
+      });
 
       return { event: inboundEvent, isOptOut: true };
     }
 
-    // Normal customer reply:
-    // Append customer inbound event to chronological thread
+    // Normal inbound reply
     const inboundEvent: ThreadEventEntity = {
       id: `evt_in_${Date.now()}`,
       prospectId: prospect.id,
@@ -241,11 +247,9 @@ export class SmsService {
       mediaUrls,
       timestamp: new Date(),
     };
-    this.store.addEvent(inboundEvent);
+    await this.store.addEvent(inboundEvent);
 
-    // Pause automated journey per Scope 7.2:
-    // "A customer reply pauses the automated sequence and raises the thread in the portal."
-    this.store.updateProspect(prospect.id, {
+    await this.store.updateProspect(prospect.id, {
       status: ProspectStatus.WAITING_ON_US,
       journey: {
         ...prospect.journey,
@@ -254,7 +258,7 @@ export class SmsService {
       },
     });
 
-    this.store.addEvent({
+    await this.store.addEvent({
       id: `sys_${Date.now()}`,
       prospectId: prospect.id,
       type: ThreadEventType.SYSTEM,
@@ -266,7 +270,7 @@ export class SmsService {
     return { event: inboundEvent, isOptOut: false };
   }
 
-  updateDeliveryStatus(
+  async updateDeliveryStatus(
     messageId: string,
     status: DeliveryStatus,
     failureReason?: string,

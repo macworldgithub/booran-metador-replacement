@@ -2,12 +2,14 @@ import { Controller, Post, Body } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { LeadsService } from './leads.service';
 import { IngestLeadDto } from './dto/ingest-lead.dto';
+import { Public } from '../auth/decorators/public.decorator';
 
 @ApiTags('Lead Intake')
 @Controller('api/leads')
 export class LeadsController {
   constructor(private readonly leadsService: LeadsService) {}
 
+  @Public()
   @Post('ingest')
   @ApiOperation({
     summary: 'Ingest DealerSocket new lead forward',
