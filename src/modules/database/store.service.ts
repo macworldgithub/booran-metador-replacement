@@ -28,9 +28,12 @@ export class StoreService {
 
   constructor(
     @InjectModel(Prospect.name) private readonly prospectModel: Model<Prospect>,
-    @InjectModel(ThreadEvent.name) private readonly threadEventModel: Model<ThreadEvent>,
-    @InjectModel(Suppression.name) private readonly suppressionModel: Model<Suppression>,
-    @InjectModel(WritebackLog.name) private readonly writebackLogModel: Model<WritebackLog>,
+    @InjectModel(ThreadEvent.name)
+    private readonly threadEventModel: Model<ThreadEvent>,
+    @InjectModel(Suppression.name)
+    private readonly suppressionModel: Model<Suppression>,
+    @InjectModel(WritebackLog.name)
+    private readonly writebackLogModel: Model<WritebackLog>,
   ) {
     this.seedRooftops();
   }
@@ -104,7 +107,9 @@ export class StoreService {
     return doc ? this.toEntity<ProspectEntity>(doc) : null;
   }
 
-  async findProspectByOpportunityId(oppId: string): Promise<ProspectEntity | null> {
+  async findProspectByOpportunityId(
+    oppId: string,
+  ): Promise<ProspectEntity | null> {
     const doc = await this.prospectModel
       .findOne({ dealerSocketOpportunityId: oppId })
       .lean();
@@ -152,10 +157,9 @@ export class StoreService {
     return docs.map((doc) => this.toEntity<ProspectEntity>(doc));
   }
 
-
   async queryProspects(filter: {
     rooftopId?: RooftopId;
-    rooftopIds?: RooftopId[];   // for RBAC-scoped queries
+    rooftopIds?: RooftopId[]; // for RBAC-scoped queries
     status?: ProspectStatus;
     ownerName?: string;
     search?: string;
@@ -164,18 +168,26 @@ export class StoreService {
 
     if (filter.rooftopId) {
       query.rooftopId = filter.rooftopId;
-    } else if (filter.rooftopIds && filter.rooftopIds.length > 0) {
+    } else if (filter.rooftopIds !== undefined) {
       query.rooftopId = { $in: filter.rooftopIds };
     }
 
     if (filter.status) query.status = filter.status;
 
     if (filter.ownerName) {
-      query['assignedTo.name'] = { $regex: filter.ownerName, $options: 'i' };
+      const escapedOwner = filter.ownerName.replace(
+        /[.*+?^${}()|[\]\\]/g,
+        '\\$&',
+      );
+      query['assignedTo.name'] = { $regex: escapedOwner, $options: 'i' };
     }
 
     if (filter.search) {
-      const re = { $regex: filter.search, $options: 'i' };
+      const escapedSearch = filter.search.replace(
+        /[.*+?^${}()|[\]\\]/g,
+        '\\$&',
+      );
+      const re = { $regex: escapedSearch, $options: 'i' };
       query.$or = [
         { 'customer.firstName': re },
         { 'customer.lastName': re },
@@ -190,7 +202,30 @@ export class StoreService {
       .sort({ lastInboundAt: -1, lastActivityAt: -1 })
       .lean();
 
-    return docs.map((d) => this.toEntity<ProspectEntity>(d));
+    const recent = docs.length
+      ? await this.threadEventModel.aggregate([
+          {
+            $match: {
+              prospectId: { $in: docs.map((d) => d.id) },
+              type: {
+                $in: [
+                  ThreadEventType.AUTOMATED_OUTBOUND,
+                  ThreadEventType.STAFF_OUTBOUND,
+                  ThreadEventType.CUSTOMER_INBOUND,
+                ],
+              },
+            },
+          },
+          { $sort: { timestamp: -1, _id: -1 } },
+          { $group: { _id: '$prospectId', lastMessage: { $first: '$$ROOT' } } },
+        ])
+      : [];
+    const latest = new Map(recent.map((item) => [item._id, item.lastMessage]));
+    return docs.map((d) => ({
+      ...this.toEntity<ProspectEntity>(d),
+      lastMessageDirection: latest.get(d.id)?.direction,
+      lastMessagePreview: latest.get(d.id)?.content ?? '',
+    }));
   }
 
   // ─── Thread Events ────────────────────────────────────────────────────────
@@ -217,10 +252,12 @@ export class StoreService {
     return event;
   }
 
-  async getEventsByProspectId(prospectId: string): Promise<ThreadEventEntity[]> {
+  async getEventsByProspectId(
+    prospectId: string,
+  ): Promise<ThreadEventEntity[]> {
     const docs = await this.threadEventModel
       .find({ prospectId })
-      .sort({ timestamp: 1 })
+      .sort({ timestamp: 1, _id: 1 })
       .lean();
     return docs.map((d) => this.toEntity<ThreadEventEntity>(d));
   }
@@ -251,12 +288,16 @@ export class StoreService {
     source: 'keyword_opt_out' | 'manual_admin' | 'crm_flag',
   ): Promise<SuppressionEntity> {
     // upsert so re-subscribing then re-unsubscribing is handled cleanly
-    const doc = await this.suppressionModel.findOneAndUpdate(
-      { mobile },
-      { $set: { reason, source } },
-      { upsert: true, new: true },
-    ).lean();
-    this.logger.warn(`Mobile ${mobile} added to 3-rooftop global suppression: ${reason}`);
+    const doc = await this.suppressionModel
+      .findOneAndUpdate(
+        { mobile },
+        { $set: { reason, source } },
+        { upsert: true, new: true },
+      )
+      .lean();
+    this.logger.warn(
+      `Mobile ${mobile} added to 3-rooftop global suppression: ${reason}`,
+    );
     return this.toEntity<SuppressionEntity>(doc);
   }
 
@@ -266,7 +307,10 @@ export class StoreService {
   }
 
   async getSuppressionList(): Promise<SuppressionEntity[]> {
-    const docs = await this.suppressionModel.find().sort({ createdAt: -1 }).lean();
+    const docs = await this.suppressionModel
+      .find()
+      .sort({ createdAt: -1 })
+      .lean();
     return docs.map((d) => this.toEntity<SuppressionEntity>(d));
   }
 
@@ -276,7 +320,9 @@ export class StoreService {
     return this.toEntity<WritebackLogEntity>(created.toObject());
   }
 
-  async getWritebackLogs(status?: 'pending' | 'success' | 'failed'): Promise<WritebackLogEntity[]> {
+  async getWritebackLogs(
+    status?: 'pending' | 'success' | 'failed',
+  ): Promise<WritebackLogEntity[]> {
     const query = status ? { status } : {};
     const docs = await this.writebackLogModel
       .find(query)

@@ -27,7 +27,7 @@ import {
 import { JwtAuthGuard } from '../auth/guards/jwt.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
-import { UserRole, RooftopId } from '../../common/enums';
+import type { PortalActor } from './conversations.service';
 
 @ApiTags('Conversation Portal')
 @ApiBearerAuth()
@@ -40,14 +40,14 @@ export class ConversationsController {
   @ApiOperation({
     summary: 'List prospects for portal inbox',
     description:
-      'Filterable by rooftop, status, owner, or search term. Sorted by latest inbound first. Scoped to the calling user\'s assigned rooftops.',
+      "Filterable by rooftop, status, owner, or search term. Sorted by latest inbound first. Scoped to the calling user's assigned rooftops.",
   })
   @ApiResponse({ status: 200, description: 'Filtered list of prospects' })
-  getProspects(@Query() query: QueryProspectsDto, @CurrentUser() user: any) {
-    // Group Admin sees all rooftops; others are scoped to their assignments
-    const scopedRooftops =
-      user?.role === UserRole.GROUP_ADMIN ? undefined : user?.rooftopIds as RooftopId[];
-    return this.conversationsService.getProspects(query, scopedRooftops);
+  getProspects(
+    @Query() query: QueryProspectsDto,
+    @CurrentUser() user: PortalActor,
+  ) {
+    return this.conversationsService.getProspects(query, user);
   }
 
   @Get(':id')
@@ -55,55 +55,85 @@ export class ConversationsController {
   @ApiParam({ name: 'id', description: 'Prospect ID' })
   @ApiResponse({ status: 200, description: 'Prospect entity' })
   @ApiResponse({ status: 404, description: 'Prospect not found' })
-  getProspect(@Param('id') id: string) {
-    return this.conversationsService.getProspectById(id);
+  getProspect(@Param('id') id: string, @CurrentUser() user: PortalActor) {
+    return this.conversationsService.getProspectById(id, user);
   }
 
   @Get(':id/thread')
-  @ApiOperation({ summary: 'Get full chronological event thread for a prospect' })
+  @ApiOperation({
+    summary: 'Get full chronological event thread for a prospect',
+  })
   @ApiParam({ name: 'id', description: 'Prospect ID' })
-  @ApiResponse({ status: 200, description: 'Chronological thread with all events' })
-  getThread(@Param('id') id: string) {
-    return this.conversationsService.getThread(id);
+  @ApiResponse({
+    status: 200,
+    description: 'Chronological thread with all events',
+  })
+  getThread(@Param('id') id: string, @CurrentUser() user: PortalActor) {
+    return this.conversationsService.getThread(id, user);
   }
 
   @Post(':id/messages')
   @ApiOperation({ summary: 'Send a staff SMS from the portal' })
   @ApiParam({ name: 'id', description: 'Prospect ID' })
   @ApiResponse({ status: 201, description: 'SMS sent, thread event created' })
-  sendMessage(@Param('id') id: string, @Body() dto: SendStaffMessageDto) {
-    return this.conversationsService.sendStaffMessage(id, dto);
+  sendMessage(
+    @Param('id') id: string,
+    @Body() dto: SendStaffMessageDto,
+    @CurrentUser() user: PortalActor,
+  ) {
+    return this.conversationsService.sendStaffMessage(id, dto, user);
   }
 
   @Post(':id/notes')
   @ApiOperation({ summary: 'Add an internal note (never shown to customer)' })
   @ApiParam({ name: 'id', description: 'Prospect ID' })
   @ApiResponse({ status: 201, description: 'Internal note added to thread' })
-  addNote(@Param('id') id: string, @Body() dto: AddInternalNoteDto) {
-    return this.conversationsService.addInternalNote(id, dto);
+  addNote(
+    @Param('id') id: string,
+    @Body() dto: AddInternalNoteDto,
+    @CurrentUser() user: PortalActor,
+  ) {
+    return this.conversationsService.addInternalNote(id, dto, user);
   }
 
   @Patch(':id/journey')
-  @ApiOperation({ summary: 'Control automated journey (pause, resume, skip step, stop)' })
+  @ApiOperation({
+    summary: 'Control automated journey (pause, resume, skip step, stop)',
+  })
   @ApiParam({ name: 'id', description: 'Prospect ID' })
   @ApiResponse({ status: 200, description: 'Journey state updated' })
-  updateJourney(@Param('id') id: string, @Body() dto: UpdateJourneyDto) {
-    return this.conversationsService.updateJourney(id, dto);
+  updateJourney(
+    @Param('id') id: string,
+    @Body() dto: UpdateJourneyDto,
+    @CurrentUser() user: PortalActor,
+  ) {
+    return this.conversationsService.updateJourney(id, dto, user);
   }
 
   @Patch(':id/outcome')
   @ApiOperation({ summary: 'Set final outcome and close journey' })
   @ApiParam({ name: 'id', description: 'Prospect ID' })
-  @ApiResponse({ status: 200, description: 'Outcome set, write-back queued to DealerSocket' })
-  setOutcome(@Param('id') id: string, @Body() dto: SetOutcomeDto) {
-    return this.conversationsService.setOutcome(id, dto);
+  @ApiResponse({
+    status: 200,
+    description: 'Outcome set, write-back queued to DealerSocket',
+  })
+  setOutcome(
+    @Param('id') id: string,
+    @Body() dto: SetOutcomeDto,
+    @CurrentUser() user: PortalActor,
+  ) {
+    return this.conversationsService.setOutcome(id, dto, user);
   }
 
   @Patch(':id/assign')
   @ApiOperation({ summary: 'Reassign prospect to a salesperson' })
   @ApiParam({ name: 'id', description: 'Prospect ID' })
   @ApiResponse({ status: 200, description: 'Prospect reassigned' })
-  assign(@Param('id') id: string, @Body() dto: AssignProspectDto) {
-    return this.conversationsService.assignProspect(id, dto);
+  assign(
+    @Param('id') id: string,
+    @Body() dto: AssignProspectDto,
+    @CurrentUser() user: PortalActor,
+  ) {
+    return this.conversationsService.assignProspect(id, dto, user);
   }
 }

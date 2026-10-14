@@ -15,7 +15,7 @@ import {
 } from '../../common/enums';
 import { ThreadEventEntity, ProspectEntity } from '../database/entities';
 
-import twilio from 'twilio';
+import twilio = require('twilio');
 
 export interface SendSmsOptions {
   prospect: ProspectEntity;
@@ -45,7 +45,9 @@ export class SmsService {
         this.logger.warn(`Failed to initialize Twilio client: ${err.message}`);
       }
     } else {
-      this.logger.log('Twilio credentials not configured. Running SMS service in simulation mode.');
+      this.logger.log(
+        'Twilio credentials not configured. Running SMS service in simulation mode.',
+      );
     }
   }
 
@@ -67,19 +69,25 @@ export class SmsService {
     const { prospect, content, type, authorName, journeyStepName } = options;
 
     // Suppression check
-    const suppressed = await this.complianceService.isMobileSuppressed(prospect.normalizedMobile);
+    const suppressed = await this.complianceService.isMobileSuppressed(
+      prospect.normalizedMobile,
+    );
     if (suppressed) {
-      this.logger.warn(`Blocked send to suppressed mobile ${prospect.normalizedMobile}`);
+      this.logger.warn(
+        `Blocked send to suppressed mobile ${prospect.normalizedMobile}`,
+      );
       throw new BadRequestException(
         `Mobile ${prospect.normalizedMobile} is in the 3-rooftop suppression list`,
       );
     }
 
     const rooftop = this.store.getRooftopById(prospect.rooftopId);
-    if (!rooftop) throw new NotFoundException(`Rooftop not found: ${prospect.rooftopId}`);
+    if (!rooftop)
+      throw new NotFoundException(`Rooftop not found: ${prospect.rooftopId}`);
 
     let externalSid: string | undefined;
     let initialStatus = DeliveryStatus.DELIVERED;
+    let failureReason: string | undefined;
 
     // Dispatch via real Twilio if credentials configured
     if (this.twilioClient) {
@@ -92,13 +100,16 @@ export class SmsService {
         });
         externalSid = message.sid;
         initialStatus = DeliveryStatus.PENDING;
-        this.logger.log(`Twilio message created [SID: ${message.sid}] status: ${message.status}`);
+        this.logger.log(
+          `Twilio message created [SID: ${message.sid}] status: ${message.status}`,
+        );
       } catch (twilioErr: any) {
         this.logger.error(
           `Twilio send failed to ${prospect.normalizedMobile}: ${twilioErr.message}`,
           twilioErr.stack,
         );
         initialStatus = DeliveryStatus.FAILED;
+        failureReason = twilioErr.message || 'Carrier rejected the message';
       }
     }
 
@@ -112,12 +123,14 @@ export class SmsService {
       authorName,
       journeyStepName,
       deliveryStatus: initialStatus,
+      failureReason,
       timestamp: new Date(),
       metadata: {
         from: rooftop.senderPhone,
         to: prospect.normalizedMobile,
         rooftopName: rooftop.name,
         twilioMessageSid: externalSid,
+        simulated: !this.twilioClient,
       },
     };
 
@@ -129,7 +142,10 @@ export class SmsService {
     // Staff send → pause automated journey (Scope §7.2)
     if (type === ThreadEventType.STAFF_OUTBOUND) {
       await this.store.updateProspect(prospect.id, {
-        status: ProspectStatus.WAITING_ON_CUSTOMER,
+        status:
+          initialStatus === DeliveryStatus.FAILED
+            ? ProspectStatus.WAITING_ON_US
+            : ProspectStatus.WAITING_ON_CUSTOMER,
         journey: {
           ...prospect.journey,
           status: 'paused',
@@ -162,7 +178,9 @@ export class SmsService {
     }
 
     const targetRooftop = this.store.getRooftopBySenderPhone(to);
-    const rooftopId = targetRooftop ? targetRooftop.id : RooftopId.CRANBOURNE_KIA;
+    const rooftopId = targetRooftop
+      ? targetRooftop.id
+      : RooftopId.CRANBOURNE_KIA;
 
     // Find prospect within 30-day window
     let prospect = await this.store.findRecentProspectByMobileAndRooftop(
@@ -173,7 +191,9 @@ export class SmsService {
 
     // Fallback: search across rooftops
     if (!prospect) {
-      const allProspects = await this.store.queryProspects({ search: normFrom.normalized });
+      const allProspects = await this.store.queryProspects({
+        search: normFrom.normalized,
+      });
       prospect = allProspects[0] || null;
     }
 

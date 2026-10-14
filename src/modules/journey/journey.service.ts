@@ -1,10 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  BadRequestException,
+  NotFoundException,
+} from '@nestjs/common';
 import { StoreService } from '../database/store.service';
 import { SmsService } from '../sms/sms.service';
-import {
-  ProspectEntity,
-  RooftopEntity,
-} from '../database/entities';
+import { ProspectEntity, RooftopEntity } from '../database/entities';
 import {
   ThreadEventType,
   ProspectStatus,
@@ -74,7 +76,9 @@ export class JourneyService {
       minute: '2-digit',
     });
     const [currentHour, currentMin] = melbourneTimeStr.split(':').map(Number);
-    const [startHour, startMin] = rooftop.sendHours.start.split(':').map(Number);
+    const [startHour, startMin] = rooftop.sendHours.start
+      .split(':')
+      .map(Number);
     const [endHour, endMin] = rooftop.sendHours.end.split(':').map(Number);
     const currentTotalMin = currentHour * 60 + currentMin;
     const startTotalMin = startHour * 60 + startMin;
@@ -168,7 +172,7 @@ export class JourneyService {
       return false;
     }
 
-    const currentStep = prospect.journey.currentStep || 1;
+    const currentStep = prospect.journey.currentStep ?? 0;
     const nextStepNum = currentStep + 1;
 
     if (nextStepNum > 5) {
@@ -188,10 +192,16 @@ export class JourneyService {
     const stepDef = this.defaultSteps.find((s) => s.step === nextStepNum);
     if (!stepDef) return false;
 
-    const messageText = this.renderTemplate(stepDef.template, prospect, rooftop);
+    const messageText = this.renderTemplate(
+      stepDef.template,
+      prospect,
+      rooftop,
+    );
 
     const isFinalStep = nextStepNum === 5;
-    const nextSchedule = isFinalStep ? undefined : this.calculateNextStepSchedule(nextStepNum + 1);
+    const nextSchedule = isFinalStep
+      ? undefined
+      : this.calculateNextStepSchedule(nextStepNum + 1);
 
     await this.store.updateProspect(prospect.id, {
       journey: {
@@ -224,7 +234,24 @@ export class JourneyService {
     reason?: string,
   ): Promise<ProspectEntity> {
     const prospect = await this.store.findProspectById(prospectId);
-    if (!prospect) throw new Error(`Prospect not found: ${prospectId}`);
+    if (!prospect)
+      throw new NotFoundException(`Prospect not found: ${prospectId}`);
+    if (
+      action !== JourneyAction.STOP &&
+      (prospect.status === ProspectStatus.OPTED_OUT ||
+        prospect.status === ProspectStatus.CLOSED ||
+        (await this.store.isSuppressed(prospect.normalizedMobile)))
+    )
+      throw new BadRequestException(
+        'Closed or suppressed prospects cannot restart a journey',
+      );
+    if (
+      action !== JourneyAction.STOP &&
+      ['completed', 'stopped'].includes(prospect.journey.status)
+    )
+      throw new BadRequestException('This journey has ended');
+    if (action === JourneyAction.SKIP_STEP && prospect.journey.currentStep >= 5)
+      throw new BadRequestException('No later journey step is available');
 
     const currentJourney = prospect.journey;
     let newStatus = currentJourney.status;
@@ -258,7 +285,8 @@ export class JourneyService {
 
       case JourneyAction.SKIP_STEP:
         currentStep = Math.min(5, currentStep + 1);
-        currentStepName = this.defaultSteps[currentStep - 1]?.name || 'Completed';
+        currentStepName =
+          this.defaultSteps[currentStep - 1]?.name || 'Completed';
         await this.store.addEvent({
           id: `sys_${Date.now()}`,
           prospectId,
@@ -288,8 +316,18 @@ export class JourneyService {
         status: newStatus,
         currentStep,
         currentStepName,
-        pausedReason: reason,
+        pausedReason: newStatus === 'active' ? undefined : reason,
+        nextScheduledStepAt:
+          newStatus === 'active'
+            ? (currentJourney.nextScheduledStepAt ?? new Date())
+            : undefined,
       },
+      ...(action === JourneyAction.STOP &&
+      prospect.status !== ProspectStatus.OPTED_OUT
+        ? { status: ProspectStatus.CLOSED }
+        : action === JourneyAction.RESUME
+          ? { status: ProspectStatus.IN_JOURNEY }
+          : {}),
     });
 
     return updated!;
