@@ -1,9 +1,10 @@
 import { Controller, Get, Param } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiBearerAuth } from '@nestjs/swagger';
 import { RooftopsService } from './rooftops.service';
 import { RooftopId } from '../../common/enums';
 
 @ApiTags('Rooftops')
+@ApiBearerAuth()
 @Controller('api/rooftops')
 export class RooftopsController {
   constructor(private readonly rooftopsService: RooftopsService) {}
