@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { XMLParser } from 'fast-xml-parser';
 import { IngestLeadDto } from '../dto/ingest-lead.dto';
 import { resolveRooftopId } from './adf-rooftop-map';
+import { RooftopId } from '../../../common/enums';
 
 @Injectable()
 export class AdfParserService {
@@ -21,7 +22,10 @@ export class AdfParserService {
   /**
    * Parse Auto-lead Data Format (ADF / XML 1.0) into IngestLeadDto.
    */
-  parseAdf(xmlContent: string): IngestLeadDto {
+  parseAdf(
+    xmlContent: string,
+    entityMap: Record<string, RooftopId> = {},
+  ): IngestLeadDto {
     try {
       const parsed = this.parser.parse(xmlContent);
 
@@ -30,19 +34,28 @@ export class AdfParserService {
       const prospect = adf.prospect || adf.Prospect;
 
       if (!prospect) {
-        throw new BadRequestException('Invalid ADF XML: missing <prospect> element');
+        throw new BadRequestException(
+          'Invalid ADF XML: missing <prospect> element',
+        );
       }
 
       // 1. DealerSocket Opportunity ID / Prospect ID
-      let opportunityId =
-        prospect['@_id'] ||
-        prospect.id ||
-        (prospect.id && prospect.id['#text']) ||
-        `DS-ADF-${Date.now()}`;
-
-      if (typeof opportunityId === 'object') {
-        opportunityId = JSON.stringify(opportunityId);
-      }
+      const idNodes = Array.isArray(prospect.id) ? prospect.id : [prospect.id];
+      const idNode =
+        idNodes.find(
+          (node) =>
+            node &&
+            (typeof node === 'string' ||
+              /dealersocket/i.test(String(node['@_source'] ?? ''))),
+        ) ?? idNodes.find(Boolean);
+      const opportunityId =
+        typeof idNode === 'object'
+          ? idNode['#text']
+          : (idNode ?? prospect['@_id']);
+      if (typeof opportunityId !== 'string' || !opportunityId.trim())
+        throw new BadRequestException(
+          'A stable DealerSocket opportunity ID is required',
+        );
 
       // 2. Customer details
       const customer = prospect.customer || prospect.Customer || {};
@@ -65,7 +78,11 @@ export class AdfParserService {
             if (part === 'last') lastName = val;
           }
         } else if (typeof contact.name === 'object') {
-          firstName = contact.name['#text'] || contact.name.first || contact.name.firstName || 'Valued';
+          firstName =
+            contact.name['#text'] ||
+            contact.name.first ||
+            contact.name.firstName ||
+            'Valued';
           lastName = contact.name.last || contact.name.lastName || '';
         }
       }
@@ -73,11 +90,17 @@ export class AdfParserService {
       // Phone
       let mobile = '';
       if (contact.phone) {
-        const phones = Array.isArray(contact.phone) ? contact.phone : [contact.phone];
+        const phones = Array.isArray(contact.phone)
+          ? contact.phone
+          : [contact.phone];
         for (const p of phones) {
           const phoneType = p['@_type'] || p['@_time'] || '';
-          const phoneVal = typeof p === 'object' ? p['#text'] || p.text || '' : p;
-          if (phoneType.toLowerCase().includes('cell') || phoneType.toLowerCase().includes('mobile')) {
+          const phoneVal =
+            typeof p === 'object' ? p['#text'] || p.text || '' : p;
+          if (
+            phoneType.toLowerCase().includes('cell') ||
+            phoneType.toLowerCase().includes('mobile')
+          ) {
             mobile = String(phoneVal);
             break;
           }
@@ -90,14 +113,24 @@ export class AdfParserService {
       // Email
       let email: string | undefined;
       if (contact.email) {
-        email = typeof contact.email === 'object' ? contact.email['#text'] || contact.email.text : String(contact.email);
+        email =
+          typeof contact.email === 'object'
+            ? contact.email['#text'] || contact.email.text
+            : String(contact.email);
       }
 
       // 3. Vendor / Rooftop identification
       const vendor = prospect.vendor || prospect.Vendor || {};
-      const vendorName = vendor.vendorname || vendor.name || (typeof vendor === 'object' ? vendor['#text'] : '');
-      const vendorId = vendor.id || (vendor['@_id'] ? vendor['@_id'] : '');
-      const rooftopId = resolveRooftopId(vendorId || vendorName);
+      const vendorName =
+        vendor.vendorname ||
+        vendor.name ||
+        (typeof vendor === 'object' ? vendor['#text'] : '');
+      const vendorNode = Array.isArray(vendor.id) ? vendor.id[0] : vendor.id;
+      const vendorId =
+        typeof vendorNode === 'object'
+          ? vendorNode['#text']
+          : vendorNode || vendor['@_id'];
+      const rooftopId = resolveRooftopId(vendorId || vendorName, entityMap);
 
       // 4. Vehicle interest
       const vehicleNode = prospect.vehicle || prospect.Vehicle;
@@ -118,7 +151,8 @@ export class AdfParserService {
           year: isNaN(year!) ? undefined : year,
           isNew: status ? status.toLowerCase() === 'new' : undefined,
           stockNumber,
-          comments: typeof comments === 'object' ? JSON.stringify(comments) : comments,
+          comments:
+            typeof comments === 'object' ? JSON.stringify(comments) : comments,
         };
       }
 
@@ -136,7 +170,9 @@ export class AdfParserService {
       if (salespersonNode) {
         const spName =
           salespersonNode.name ||
-          (typeof salespersonNode === 'object' ? salespersonNode['#text'] : String(salespersonNode));
+          (typeof salespersonNode === 'object'
+            ? salespersonNode['#text']
+            : String(salespersonNode));
         const spEmail = salespersonNode.email;
         if (spName) {
           salesperson = {
@@ -151,7 +187,9 @@ export class AdfParserService {
 
       return {
         dealerSocketOpportunityId: String(opportunityId),
-        dealerSocketCustomerId: customer['@_id'] ? String(customer['@_id']) : undefined,
+        dealerSocketCustomerId: customer['@_id']
+          ? String(customer['@_id'])
+          : undefined,
         rooftopId,
         customer: {
           firstName: String(firstName).trim(),
@@ -162,7 +200,13 @@ export class AdfParserService {
         vehicle,
         leadSource: String(providerName).trim().toLowerCase(),
         salesperson,
-        receivedAt: typeof requestDate === 'string' ? requestDate : new Date().toISOString(),
+        receivedAt:
+          typeof requestDate === 'string'
+            ? requestDate
+            : new Date().toISOString(),
+        isNewLead: !['old', 'historical', 'closed'].includes(
+          String(prospect['@_status'] ?? '').toLowerCase(),
+        ),
       };
     } catch (err: any) {
       this.logger.error(`Failed to parse ADF XML: ${err.message}`, err.stack);

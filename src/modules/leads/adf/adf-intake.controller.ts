@@ -9,7 +9,17 @@ import {
   Logger,
   BadRequestException,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiConsumes } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiConsumes,
+  ApiSecurity,
+} from '@nestjs/swagger';
+import { StoreService } from '../../database/store.service';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
+import { IngestLeadDto } from '../dto/ingest-lead.dto';
 import { Request } from 'express';
 import { Public } from '../../auth/decorators/public.decorator';
 import { AdfParserService } from './adf-parser.service';
@@ -23,9 +33,11 @@ export class AdfIntakeController {
   constructor(
     private readonly adfParserService: AdfParserService,
     private readonly leadsService: LeadsService,
+    private readonly store: StoreService,
   ) {}
 
   @Public()
+  @ApiSecurity('leadForward')
   @Post('ingest-adf')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -34,8 +46,14 @@ export class AdfIntakeController {
       'Receives DealerSocket lead-forward XML payload, parses ADF format, creates lead thread, normalizes mobile, and kicks off Journey Step 1.',
   })
   @ApiConsumes('application/xml', 'text/xml', 'application/json', 'text/plain')
-  @ApiResponse({ status: 200, description: 'Lead accepted and ingested successfully' })
-  @ApiResponse({ status: 400, description: 'Malformed XML or missing mandatory fields' })
+  @ApiResponse({
+    status: 200,
+    description: 'Lead accepted and ingested successfully',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Malformed XML or missing mandatory fields',
+  })
   async ingestAdf(
     @Body() body: any,
     @Headers('content-type') contentType: string,
@@ -65,7 +83,16 @@ export class AdfIntakeController {
 
     this.logger.log(`Received ADF/XML payload (${xmlContent.length} bytes)`);
 
-    const dto = this.adfParserService.parseAdf(xmlContent);
+    const settings = await this.store.getSettings();
+    const dto = plainToInstance(
+      IngestLeadDto,
+      this.adfParserService.parseAdf(xmlContent, settings.entityMap),
+    );
+    const errors = await validate(dto, { whitelist: true });
+    if (errors.length)
+      throw new BadRequestException(
+        'ADF payload is missing or contains invalid required lead fields',
+      );
 
     // Ingest normalized lead into the workflow & journey engine
     const result = await this.leadsService.ingestLead(dto);

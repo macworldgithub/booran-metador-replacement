@@ -67,9 +67,12 @@ suite('Conversation portal: HTTP, JWT, services and isolated MongoDB', () => {
     DS_CLIENT_ID: process.env.DS_CLIENT_ID,
     DS_CLIENT_SECRET: process.env.DS_CLIENT_SECRET,
   };
-  const dbName = process.env.PORTAL_E2E_DB || `portal_e2e_${Date.now()}_${randomUUID().slice(0, 8)}`;
+  const dbName =
+    process.env.PORTAL_E2E_DB ||
+    `portal_e2e_${Date.now()}_${randomUUID().slice(0, 8)}`;
   beforeAll(async () => {
-    if (!/^portal_e2e_[a-zA-Z0-9_]+$/.test(dbName)) throw new Error('Use an isolated portal_e2e_ database only');
+    if (!/^portal_e2e_[a-zA-Z0-9_]+$/.test(dbName))
+      throw new Error('Use an isolated portal_e2e_ database only');
     process.env.JWT_SECRET = 'conversation-test-only';
     process.env.TWILIO_ACCOUNT_SID = '';
     process.env.TWILIO_AUTH_TOKEN = '';
@@ -115,6 +118,7 @@ suite('Conversation portal: HTTP, JWT, services and isolated MongoDB', () => {
     await app.init();
     db = app.get(getConnectionToken());
     store = app.get(StoreService);
+    await store.initializeOperations();
     sms = app.get(SmsService);
     userModel = app.get(getModelToken(User.name));
     const login = await request(app.getHttpServer())
@@ -172,6 +176,7 @@ suite('Conversation portal: HTTP, JWT, services and isolated MongoDB', () => {
       db.collection('thread_events').deleteMany({}),
       db.collection('suppressions').deleteMany({}),
       db.collection('writeback_logs').deleteMany({}),
+      db.collection('portal_records').deleteMany({}),
     ]);
     id = `pr_${randomUUID()}`;
     foreign = `pr_${randomUUID()}`;
@@ -222,6 +227,7 @@ suite('Conversation portal: HTTP, JWT, services and isolated MongoDB', () => {
             'suppressions',
             'writeback_logs',
             'users',
+            'portal_records',
           ].map((collection) => db.collection(collection).deleteMany({})),
         );
     } finally {
@@ -554,19 +560,54 @@ suite('Conversation portal: HTTP, JWT, services and isolated MongoDB', () => {
     }
   });
   const browserIt = process.env.RUN_PORTAL_BROWSER === '1' ? it : it.skip;
-  browserIt('verifies complete desktop and mobile workflows in headless Edge', async () => {
-    if (!app.getHttpServer().listening) await app.listen(0, '127.0.0.1');
-    const port = app.getHttpServer().address().port;
-    const frontendRoot = resolve(__dirname, '../../metador-replacement-frontend');
-    const result = await new Promise<object>((done, reject) => {
-      const child = spawn(process.execPath, [resolve(frontendRoot, 'tests/browser-portal.mjs'), '--run'], { windowsHide: true, cwd: frontendRoot, env: { ...process.env, PORTAL_BROWSER_BACKEND: `http://127.0.0.1:${port}/api`, PORTAL_BROWSER_PROSPECT: id, PORTAL_BROWSER_EMAIL: 'admin@booran.com.au', PORTAL_BROWSER_PASSWORD: 'Admin@2026!' } });
-      let output = ''; let error = '';
-      child.stdout.on('data', (data) => { output += data.toString(); });
-      child.stderr.on('data', (data) => { error += data.toString(); });
-      child.on('error', reject);
-      child.on('exit', (code) => { if (code !== 0) reject(new Error(`Browser workflow failed: ${error}`)); else { try { done(JSON.parse(output.trim())); } catch { reject(new Error('Invalid browser test result')); } } });
-    });
-    expect(result).toEqual({ desktop: true, mobile: true, runtimeErrors: 0 });
-  }, 120000);
-
+  browserIt(
+    'verifies complete desktop and mobile workflows in headless Edge',
+    async () => {
+      if (!app.getHttpServer().listening) await app.listen(0, '127.0.0.1');
+      const port = app.getHttpServer().address().port;
+      const frontendRoot = resolve(
+        __dirname,
+        '../../metador-replacement-frontend',
+      );
+      const result = await new Promise<object>((done, reject) => {
+        const child = spawn(
+          process.execPath,
+          [resolve(frontendRoot, 'tests/browser-portal.mjs'), '--run'],
+          {
+            windowsHide: true,
+            cwd: frontendRoot,
+            env: {
+              ...process.env,
+              PORTAL_BROWSER_BACKEND: `http://127.0.0.1:${port}/api`,
+              PORTAL_BROWSER_PROSPECT: id,
+              PORTAL_BROWSER_EMAIL: 'admin@booran.com.au',
+              PORTAL_BROWSER_PASSWORD: 'Admin@2026!',
+            },
+          },
+        );
+        let output = '';
+        let error = '';
+        child.stdout.on('data', (data) => {
+          output += data.toString();
+        });
+        child.stderr.on('data', (data) => {
+          error += data.toString();
+        });
+        child.on('error', reject);
+        child.on('exit', (code) => {
+          if (code !== 0)
+            reject(new Error(`Browser workflow failed: ${error}`));
+          else {
+            try {
+              done(JSON.parse(output.trim()));
+            } catch {
+              reject(new Error('Invalid browser test result'));
+            }
+          }
+        });
+      });
+      expect(result).toEqual({ desktop: true, mobile: true, runtimeErrors: 0 });
+    },
+    120000,
+  );
 });

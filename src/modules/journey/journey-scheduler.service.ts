@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { Cron } from '@nestjs/schedule';
 import { StoreService } from '../database/store.service';
 import { JourneyService } from './journey.service';
 
@@ -14,12 +14,14 @@ export class JourneySchedulerService {
   ) {}
 
   /**
-   * Run every 5 minutes to evaluate due steps across all active journeys.
+   * Evaluate due steps every 15 seconds; per-prospect MongoDB leases prevent overlap.
    */
-  @Cron(CronExpression.EVERY_5_MINUTES)
+  @Cron('*/15 * * * * *')
   async handleCron() {
     if (this.isProcessing) {
-      this.logger.debug('Previous journey scheduler run still active, skipping tick.');
+      this.logger.debug(
+        'Previous journey scheduler run still active, skipping tick.',
+      );
       return;
     }
 
@@ -30,7 +32,9 @@ export class JourneySchedulerService {
       const dueProspects = await this.store.findDueJourneys(now);
 
       if (dueProspects.length > 0) {
-        this.logger.log(`Found ${dueProspects.length} prospect(s) with due journey steps.`);
+        this.logger.log(
+          `Found ${dueProspects.length} prospect(s) with due journey steps.`,
+        );
 
         for (const prospect of dueProspects) {
           try {
@@ -44,7 +48,10 @@ export class JourneySchedulerService {
         }
       }
     } catch (err: any) {
-      this.logger.error(`Journey scheduler cycle failed: ${err.message}`, err.stack);
+      this.logger.error(
+        `Journey scheduler cycle failed: ${err.message}`,
+        err.stack,
+      );
     } finally {
       this.isProcessing = false;
     }

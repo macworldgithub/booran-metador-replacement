@@ -14,7 +14,7 @@ export interface RooftopEntity {
   displayPhone: string;
   sendHours: {
     start: string; // e.g. "09:00"
-    end: string;   // e.g. "20:00"
+    end: string; // e.g. "20:00"
   };
   closedDays: string[];
 }
@@ -42,6 +42,10 @@ export interface AssignedStaff {
 }
 
 export interface JourneyState {
+  versionId?: string;
+  version?: number;
+  leadType?: string;
+  startedAt?: Date;
   status: 'active' | 'paused' | 'completed' | 'stopped';
   currentStep: number;
   currentStepName: string;
@@ -51,6 +55,16 @@ export interface JourneyState {
 }
 
 export interface ProspectEntity {
+  receivedAt?: Date;
+  leadType?: string;
+  consent?: {
+    enquiryConsent: boolean;
+    marketingConsent: boolean;
+    evidence: string;
+    recordedAt: Date;
+    recordedBy?: string;
+  };
+  opportunityAliases?: string[];
   id: string;
   dealerSocketOpportunityId: string;
   dealerSocketCustomerId?: string;
@@ -93,6 +107,8 @@ export interface SuppressionEntity {
 }
 
 export interface WritebackLogEntity {
+  simulated?: boolean;
+  nextAttemptAt?: Date;
   id: string;
   prospectId: string;
   opportunityId: string;

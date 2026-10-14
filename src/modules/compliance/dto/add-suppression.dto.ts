@@ -1,5 +1,12 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsString, IsOptional } from 'class-validator';
+import {
+  IsNotEmpty,
+  IsString,
+  IsOptional,
+  IsIn,
+  Matches,
+  MaxLength,
+} from 'class-validator';
 
 export class AddSuppressionDto {
   @ApiProperty({
@@ -16,6 +23,8 @@ export class AddSuppressionDto {
   })
   @IsNotEmpty()
   @IsString()
+  @Matches(/\S/)
+  @MaxLength(1000)
   reason: string;
 
   @ApiProperty({
@@ -24,6 +33,6 @@ export class AddSuppressionDto {
     required: false,
   })
   @IsOptional()
-  @IsString()
+  @IsIn(['manual_admin', 'keyword_opt_out', 'crm_flag'])
   source?: 'manual_admin' | 'keyword_opt_out' | 'crm_flag';
 }

@@ -12,7 +12,8 @@ export class InboundSmsDto {
 
   @ApiProperty({
     example: '+61488800209',
-    description: 'Rooftop incoming number (+61488800209 for Cranbourne Kia, etc.)',
+    description:
+      'Rooftop incoming number (+61488800209 for Cranbourne Kia, etc.)',
   })
   @IsNotEmpty()
   @IsString()
@@ -43,5 +44,6 @@ export class InboundSmsDto {
   })
   @IsOptional()
   @IsArray()
+  @IsString({ each: true })
   mediaUrls?: string[];
 }

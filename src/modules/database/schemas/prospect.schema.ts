@@ -1,11 +1,19 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument } from 'mongoose';
-import { RooftopId, ProspectStatus, ProspectOutcome } from '../../../common/enums';
+import {
+  RooftopId,
+  ProspectStatus,
+  ProspectOutcome,
+} from '../../../common/enums';
 
 export type ProspectDocument = HydratedDocument<Prospect>;
 
 @Schema({ collection: 'prospects', timestamps: true, versionKey: false })
 export class Prospect {
+  @Prop() receivedAt?: Date;
+  @Prop({ default: 'new_vehicle_internet' }) leadType?: string;
+  @Prop({ type: Object }) consent?: Record<string, any>;
+  @Prop({ type: [String], default: [] }) opportunityAliases?: string[];
   // Application-level string ID (kept for compatibility with existing code)
   @Prop({ required: true, unique: true, index: true })
   id: string;

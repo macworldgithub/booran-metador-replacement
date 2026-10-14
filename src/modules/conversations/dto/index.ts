@@ -7,6 +7,9 @@ import {
   Matches,
   MaxLength,
   IsEmail,
+  IsDateString,
+  IsIn,
+  ValidateIf,
 } from 'class-validator';
 import {
   RooftopId,
@@ -16,6 +19,19 @@ import {
 } from '../../../common/enums';
 
 export class QueryProspectsDto {
+  @ApiProperty({ required: false }) @IsOptional() @IsString() source?: string;
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsDateString()
+  landedFrom?: string;
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsDateString()
+  landedTo?: string;
+  @ApiProperty({ required: false, enum: ['mine', 'unassigned'] })
+  @IsOptional()
+  @IsIn(['mine', 'unassigned'])
+  ownership?: 'mine' | 'unassigned';
   @ApiProperty({ enum: RooftopId, required: false })
   @IsOptional()
   @IsEnum(RooftopId)
@@ -45,9 +61,18 @@ export class QueryProspectsDto {
 
 export class SendStaffMessageDto {
   @ApiProperty({
+    required: false,
+    description:
+      'Active template ID. Merge fields are rendered for this prospect.',
+  })
+  @IsOptional()
+  @IsString()
+  templateId?: string;
+  @ApiProperty({
     example:
       'Hi John, I can have the Sportage ready for you at 2pm today. Cheers, David.',
   })
+  @ValidateIf((dto) => !dto.templateId)
   @IsNotEmpty()
   @IsString()
   @Matches(/\S/, { message: 'content must not be blank' })

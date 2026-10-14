@@ -3,6 +3,7 @@ import {
   Logger,
   BadRequestException,
   NotFoundException,
+  ConflictException,
 } from '@nestjs/common';
 import { StoreService } from '../database/store.service';
 import { ComplianceService } from '../compliance/compliance.service';
@@ -16,13 +17,19 @@ import {
 import { ThreadEventEntity, ProspectEntity } from '../database/entities';
 
 import twilio = require('twilio');
+import { randomUUID, createHash } from 'crypto';
+import { WritebackService } from '../writeback/writeback.service';
+import { compliantMessage } from '../../common/utils/message-template';
+import { smsSegments } from '../../common/utils/sms-segments';
 
 export interface SendSmsOptions {
   prospect: ProspectEntity;
   content: string;
   type: ThreadEventType.AUTOMATED_OUTBOUND | ThreadEventType.STAFF_OUTBOUND;
   authorName?: string;
+  authorId?: string;
   journeyStepName?: string;
+  leaseOwner?: string;
 }
 
 @Injectable()
@@ -33,13 +40,17 @@ export class SmsService {
   constructor(
     private readonly store: StoreService,
     private readonly complianceService: ComplianceService,
+    private readonly writebackService: WritebackService,
   ) {
     const accountSid = process.env.TWILIO_ACCOUNT_SID;
     const authToken = process.env.TWILIO_AUTH_TOKEN;
 
     if (accountSid && authToken && !accountSid.startsWith('ACxxx')) {
       try {
-        this.twilioClient = twilio(accountSid, authToken);
+        this.twilioClient = twilio(accountSid, authToken, {
+          timeout: 10000,
+          autoRetry: false,
+        });
         this.logger.log('Twilio SMS client initialized successfully');
       } catch (err: any) {
         this.logger.warn(`Failed to initialize Twilio client: ${err.message}`);
@@ -52,21 +63,50 @@ export class SmsService {
   }
 
   calculateSegments(text: string) {
-    const isUnicode = /[^\u0000-\u007F]/.test(text);
-    const charCount = text.length;
-    const segmentLimit = isUnicode ? 70 : 160;
-    const multiLimit = isUnicode ? 67 : 153;
-    const segments =
-      charCount === 0
-        ? 1
-        : charCount <= segmentLimit
-          ? 1
-          : Math.ceil(charCount / multiLimit);
-    return { charCount, segments, isUnicode, maxSingleSegment: segmentLimit };
+    return smsSegments(text);
   }
 
   async sendOutboundSms(options: SendSmsOptions): Promise<ThreadEventEntity> {
-    const { prospect, content, type, authorName, journeyStepName } = options;
+    if (options.leaseOwner) return this.dispatchSms(options);
+    const key = `prospect:${options.prospect.id}`;
+    const owner = await this.store.lease(key, 120);
+    if (!owner)
+      throw new ConflictException(
+        'Another conversation action is in progress; retry',
+      );
+    try {
+      return await this.dispatchSms(options);
+    } finally {
+      await this.store.releaseLease(key, owner);
+    }
+  }
+
+  private async dispatchSms(
+    options: SendSmsOptions,
+  ): Promise<ThreadEventEntity> {
+    const { type, authorName, journeyStepName } = options;
+    const latest = await this.store.findProspectById(options.prospect.id);
+    if (!latest) throw new NotFoundException('Prospect not found');
+    const prospect = {
+      ...latest,
+      journey: {
+        ...latest.journey,
+        ...(type === ThreadEventType.AUTOMATED_OUTBOUND
+          ? options.prospect.journey
+          : {}),
+      },
+    };
+    if (
+      prospect.status === ProspectStatus.OPTED_OUT ||
+      prospect.consent?.enquiryConsent === false
+    )
+      throw new BadRequestException(
+        'Opted-out or non-consenting prospects cannot receive SMS',
+      );
+    const settings = await this.store.getSettings();
+    if (settings.requireExplicitConsent && !prospect.consent?.enquiryConsent)
+      throw new BadRequestException('Recorded enquiry consent is required');
+    await this.store.refreshRooftops();
 
     // Suppression check
     const suppressed = await this.complianceService.isMobileSuppressed(
@@ -84,6 +124,17 @@ export class SmsService {
     const rooftop = this.store.getRooftopById(prospect.rooftopId);
     if (!rooftop)
       throw new NotFoundException(`Rooftop not found: ${prospect.rooftopId}`);
+    const content = compliantMessage(options.content, rooftop);
+    // Pause before dispatch so a scheduler cannot speak over a staff send.
+    if (type === ThreadEventType.STAFF_OUTBOUND)
+      await this.store.updateProspect(prospect.id, {
+        journey: {
+          ...prospect.journey,
+          status: 'paused',
+          pausedReason: `Staff send by ${authorName || 'User'}`,
+          nextScheduledStepAt: undefined,
+        },
+      });
 
     let externalSid: string | undefined;
     let initialStatus = DeliveryStatus.DELIVERED;
@@ -113,7 +164,7 @@ export class SmsService {
       }
     }
 
-    const eventId = `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const eventId = `evt_${randomUUID()}`;
     const event: ThreadEventEntity = {
       id: eventId,
       prospectId: prospect.id,
@@ -131,6 +182,9 @@ export class SmsService {
         rooftopName: rooftop.name,
         twilioMessageSid: externalSid,
         simulated: !this.twilioClient,
+        authorId: options.authorId,
+        journeyVersionId: prospect.journey.versionId,
+        journeyVersion: prospect.journey.version,
       },
     };
 
@@ -141,20 +195,25 @@ export class SmsService {
 
     // Staff send → pause automated journey (Scope §7.2)
     if (type === ThreadEventType.STAFF_OUTBOUND) {
+      const nowSuppressed = await this.store.isSuppressed(
+        prospect.normalizedMobile,
+      );
       await this.store.updateProspect(prospect.id, {
-        status:
-          initialStatus === DeliveryStatus.FAILED
+        status: nowSuppressed
+          ? ProspectStatus.OPTED_OUT
+          : initialStatus === DeliveryStatus.FAILED
             ? ProspectStatus.WAITING_ON_US
             : ProspectStatus.WAITING_ON_CUSTOMER,
         journey: {
           ...prospect.journey,
-          status: 'paused',
+          status: nowSuppressed ? 'stopped' : 'paused',
           pausedReason: `Staff send by ${authorName || 'User'}`,
+          nextScheduledStepAt: undefined,
         },
       });
 
       await this.store.addEvent({
-        id: `sys_${Date.now()}`,
+        id: `sys_${randomUUID()}`,
         prospectId: prospect.id,
         type: ThreadEventType.SYSTEM,
         direction: 'internal',
@@ -163,6 +222,18 @@ export class SmsService {
       });
     }
 
+    await this.writebackService.queueWriteback(
+      prospect.id,
+      prospect.dealerSocketOpportunityId,
+      initialStatus === DeliveryStatus.FAILED
+        ? 'sms_failed'
+        : type === ThreadEventType.STAFF_OUTBOUND
+          ? 'staff_sms_sent'
+          : (prospect.journey.currentStep ?? 0) === 0
+            ? 'journey_started'
+            : 'automated_sms_sent',
+      `${event.timestamp.toISOString()} | ${authorName || journeyStepName || 'Automation'} | ${content}`,
+    );
     return event;
   }
 
@@ -171,30 +242,35 @@ export class SmsService {
     to: string,
     body: string,
     mediaUrls?: string[],
-  ): Promise<{ event: ThreadEventEntity; isOptOut: boolean }> {
+    messageId?: string,
+  ) {
     const normFrom = PhoneNormalizer.normalizeAustralianPhone(from);
     if (!normFrom.isValid || !normFrom.normalized) {
       throw new BadRequestException(`Invalid Australian sender phone: ${from}`);
     }
 
+    await this.store.refreshRooftops();
     const targetRooftop = this.store.getRooftopBySenderPhone(to);
-    const rooftopId = targetRooftop
-      ? targetRooftop.id
-      : RooftopId.CRANBOURNE_KIA;
-
-    // Find prospect within 30-day window
-    let prospect = await this.store.findRecentProspectByMobileAndRooftop(
+    if (!targetRooftop)
+      throw new BadRequestException('Unknown receiving rooftop number');
+    const rooftopId = targetRooftop.id;
+    const prospect = await this.store.latestProspectForMobile(
       normFrom.normalized,
       rooftopId,
-      30,
     );
-
-    // Fallback: search across rooftops
-    if (!prospect) {
-      const allProspects = await this.store.queryProspects({
-        search: normFrom.normalized,
+    const isOptOut = PhoneNormalizer.isOptOutKeyword(body);
+    if (!prospect && isOptOut) {
+      await this.complianceService.addSuppression(
+        normFrom.normalized,
+        'Unmatched customer STOP',
+        'keyword_opt_out',
+      );
+      await this.store.audit('unmatched_opt_out', undefined, {
+        mobile: normFrom.normalized,
+        rooftopId,
       });
-      prospect = allProspects[0] || null;
+      await this.confirmOptOut(normFrom.normalized, targetRooftop);
+      return { event: null, isOptOut: true };
     }
 
     if (!prospect) {
@@ -203,91 +279,190 @@ export class SmsService {
       );
     }
 
-    const isOptOut = PhoneNormalizer.isOptOutKeyword(body);
+    if (messageId && !(await this.store.claimCarrierMessage(messageId))) {
+      const record = await this.store.recordGet('carrier_message', messageId);
+      if (record?.data.state !== 'done')
+        throw new ConflictException(
+          'Carrier message is being processed; retry',
+        );
+      return { duplicate: true, event: null, isOptOut };
+    }
+    const key = `prospect:${prospect.id}`;
+    const owner = await this.store.lease(key, 120);
+    if (!owner) {
+      if (messageId)
+        await this.store.recordDelete('carrier_message', messageId);
+      throw new ConflictException('Conversation is busy; carrier should retry');
+    }
+    try {
+      const current = await this.store.findProspectById(prospect.id);
+      if (current) prospect.journey = current.journey;
 
-    if (isOptOut) {
-      await this.complianceService.addSuppression(
-        normFrom.normalized,
-        `Opt-out keyword received: ${body.trim()}`,
-        'keyword_opt_out',
-      );
+      if (isOptOut) {
+        await this.complianceService.addSuppression(
+          normFrom.normalized,
+          `Opt-out keyword received: ${body.trim()}`,
+          'keyword_opt_out',
+        );
 
+        const inboundEvent: ThreadEventEntity = {
+          id: `evt_in_${messageId ? createHash('sha256').update(messageId).digest('hex') : randomUUID()}`,
+          prospectId: prospect.id,
+          type: ThreadEventType.CUSTOMER_INBOUND,
+          direction: 'inbound',
+          content: body,
+          mediaUrls,
+          timestamp: new Date(),
+          metadata: { carrierMessageId: messageId },
+        };
+        await this.store.addEvent(inboundEvent);
+
+        await this.store.addEvent({
+          id: `sys_${randomUUID()}`,
+          prospectId: prospect.id,
+          type: ThreadEventType.SYSTEM,
+          direction: 'internal',
+          content: `Customer unsubscribed (${body.trim()}). Number added to 3-rooftop global suppression list.`,
+          timestamp: new Date(),
+        });
+
+        await this.store.updateProspect(prospect.id, {
+          status: ProspectStatus.OPTED_OUT,
+          journey: {
+            ...prospect.journey,
+            status: 'stopped',
+            pausedReason: 'Customer opted out with STOP keyword',
+            nextScheduledStepAt: undefined,
+          },
+        });
+
+        await this.confirmOptOut(
+          normFrom.normalized,
+          targetRooftop,
+          prospect.id,
+        );
+        if (messageId)
+          await this.store.recordSave('carrier_message', messageId, {
+            state: 'done',
+          });
+
+        return { event: inboundEvent, isOptOut: true };
+      }
+
+      // Normal inbound reply
       const inboundEvent: ThreadEventEntity = {
-        id: `evt_in_${Date.now()}`,
+        id: `evt_in_${messageId ? createHash('sha256').update(messageId).digest('hex') : randomUUID()}`,
         prospectId: prospect.id,
         type: ThreadEventType.CUSTOMER_INBOUND,
         direction: 'inbound',
         content: body,
         mediaUrls,
         timestamp: new Date(),
+        metadata: { carrierMessageId: messageId },
       };
       await this.store.addEvent(inboundEvent);
 
-      await this.store.addEvent({
-        id: `sys_${Date.now()}`,
-        prospectId: prospect.id,
-        type: ThreadEventType.SYSTEM,
-        direction: 'internal',
-        content: `Customer unsubscribed (${body.trim()}). Number added to 3-rooftop global suppression list.`,
-        timestamp: new Date(),
-      });
-
+      const remainsSuppressed = await this.store.isSuppressed(
+        normFrom.normalized,
+      );
       await this.store.updateProspect(prospect.id, {
-        status: ProspectStatus.OPTED_OUT,
+        status: remainsSuppressed
+          ? ProspectStatus.OPTED_OUT
+          : ProspectStatus.WAITING_ON_US,
         journey: {
           ...prospect.journey,
-          status: 'stopped',
-          pausedReason: 'Customer opted out with STOP keyword',
+          status: remainsSuppressed ? 'stopped' : 'paused',
+          pausedReason: 'Paused on customer inbound reply',
+          nextScheduledStepAt: undefined,
         },
       });
 
-      const rooftop = this.store.getRooftopById(prospect.rooftopId);
-      const rooftopName = rooftop ? rooftop.name : 'Dealership';
       await this.store.addEvent({
-        id: `evt_optout_conf_${Date.now()}`,
+        id: `sys_${randomUUID()}`,
         prospectId: prospect.id,
-        type: ThreadEventType.AUTOMATED_OUTBOUND,
-        direction: 'outbound',
-        content: `${rooftopName}: You have successfully unsubscribed. No further messages will be sent.`,
-        journeyStepName: 'Opt-out Confirmation',
-        deliveryStatus: DeliveryStatus.DELIVERED,
+        type: ThreadEventType.SYSTEM,
+        direction: 'internal',
+        content: 'Automated journey paused due to inbound customer reply.',
         timestamp: new Date(),
       });
 
-      return { event: inboundEvent, isOptOut: true };
+      await this.writebackService.queueWriteback(
+        prospect.id,
+        prospect.dealerSocketOpportunityId,
+        'customer_replied',
+        `${inboundEvent.timestamp.toISOString()} | Customer SMS: ${body}`,
+      );
+      await this.store.notifyOwner(
+        prospect,
+        'A customer reply is waiting for your response.',
+      );
+      if (messageId)
+        await this.store.recordSave('carrier_message', messageId, {
+          state: 'done',
+        });
+      return { event: inboundEvent, isOptOut: false };
+    } catch (error) {
+      if (messageId)
+        await this.store.recordDelete('carrier_message', messageId);
+      throw error;
+    } finally {
+      await this.store.releaseLease(key, owner);
     }
+  }
 
-    // Normal inbound reply
-    const inboundEvent: ThreadEventEntity = {
-      id: `evt_in_${Date.now()}`,
-      prospectId: prospect.id,
-      type: ThreadEventType.CUSTOMER_INBOUND,
-      direction: 'inbound',
-      content: body,
-      mediaUrls,
-      timestamp: new Date(),
-    };
-    await this.store.addEvent(inboundEvent);
-
-    await this.store.updateProspect(prospect.id, {
-      status: ProspectStatus.WAITING_ON_US,
-      journey: {
-        ...prospect.journey,
-        status: 'paused',
-        pausedReason: 'Paused on customer inbound reply',
-      },
-    });
-
-    await this.store.addEvent({
-      id: `sys_${Date.now()}`,
-      prospectId: prospect.id,
-      type: ThreadEventType.SYSTEM,
-      direction: 'internal',
-      content: 'Automated journey paused due to inbound customer reply.',
-      timestamp: new Date(),
-    });
-
-    return { event: inboundEvent, isOptOut: false };
+  private async confirmOptOut(
+    mobile: string,
+    rooftop: import('../database/entities').RooftopEntity,
+    prospectId?: string,
+  ) {
+    const key = `optout:${mobile}`;
+    const owner = await this.store.lease(key, 120);
+    if (!owner)
+      throw new ConflictException('Opt-out confirmation is in progress; retry');
+    try {
+      if (await this.store.recordGet('optout_confirmation', mobile)) return;
+      const content = `${rooftop.name}: You have successfully unsubscribed. No further commercial messages will be sent.`;
+      let sid: string | undefined;
+      let failure: string | undefined;
+      try {
+        if (this.twilioClient)
+          sid = (
+            await this.twilioClient.messages.create({
+              body: content,
+              from: rooftop.senderPhone,
+              to: mobile,
+              statusCallback:
+                process.env.TWILIO_STATUS_CALLBACK_URL || undefined,
+            })
+          ).sid;
+      } catch (error: any) {
+        failure = error.message;
+      }
+      await this.store.recordSave('optout_confirmation', mobile, {
+        timestamp: new Date(),
+        failureReason: failure,
+        simulated: !this.twilioClient,
+      });
+      if (prospectId)
+        await this.store.addEvent({
+          id: `evt_${randomUUID()}`,
+          prospectId,
+          type: ThreadEventType.AUTOMATED_OUTBOUND,
+          direction: 'outbound',
+          content,
+          journeyStepName: 'Opt-out Confirmation',
+          deliveryStatus: failure
+            ? DeliveryStatus.FAILED
+            : sid
+              ? DeliveryStatus.PENDING
+              : DeliveryStatus.DELIVERED,
+          failureReason: failure,
+          timestamp: new Date(),
+          metadata: { twilioMessageSid: sid, simulated: !this.twilioClient },
+        });
+    } finally {
+      await this.store.releaseLease(key, owner);
+    }
   }
 
   async updateDeliveryStatus(

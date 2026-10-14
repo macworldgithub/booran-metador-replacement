@@ -7,11 +7,13 @@ import { RooftopEntity } from '../database/entities';
 export class RooftopsService {
   constructor(private readonly store: StoreService) {}
 
-  getAllRooftops(): RooftopEntity[] {
+  async getAllRooftops(): Promise<RooftopEntity[]> {
+    await this.store.refreshRooftops();
     return this.store.getRooftops();
   }
 
-  getRooftopById(id: RooftopId): RooftopEntity {
+  async getRooftopById(id: RooftopId): Promise<RooftopEntity> {
+    await this.store.refreshRooftops();
     const rooftop = this.store.getRooftopById(id);
     if (!rooftop) {
       throw new NotFoundException(`Rooftop ${id} not found`);

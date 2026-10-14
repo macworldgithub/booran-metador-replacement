@@ -10,6 +10,7 @@ import { LeadsModule } from './modules/leads/leads.module';
 import { ConversationsModule } from './modules/conversations/conversations.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
+import { OperationsModule } from './modules/operations/operations.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { UsersModule } from './modules/users/users.module';
     DatabaseModule,
     AuthModule,
     UsersModule,
+    OperationsModule,
     RooftopsModule,
     ComplianceModule,
     SmsModule,

@@ -7,6 +7,8 @@ import {
   ValidateNested,
   IsNumber,
   IsBoolean,
+  IsDateString,
+  Matches,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { RooftopId } from '../../../common/enums';
@@ -17,12 +19,19 @@ export class LeadCustomerDto {
   @IsString()
   firstName: string;
 
-  @ApiProperty({ example: 'Smith', required: false, description: 'Customer last name' })
+  @ApiProperty({
+    example: 'Smith',
+    required: false,
+    description: 'Customer last name',
+  })
   @IsOptional()
   @IsString()
   lastName?: string;
 
-  @ApiProperty({ example: '0412 345 678', description: 'Australian mobile number' })
+  @ApiProperty({
+    example: '0412 345 678',
+    description: 'Australian mobile number',
+  })
   @IsNotEmpty()
   @IsString()
   mobile: string;
@@ -59,7 +68,10 @@ export class LeadVehicleDto {
   @IsString()
   stockNumber?: string;
 
-  @ApiProperty({ example: 'Customer wants drive-away pricing with sunroof', required: false })
+  @ApiProperty({
+    example: 'Customer wants drive-away pricing with sunroof',
+    required: false,
+  })
   @IsOptional()
   @IsString()
   comments?: string;
@@ -78,6 +90,34 @@ export class LeadSalespersonDto {
 }
 
 export class IngestLeadDto {
+  @ApiProperty({ required: false, default: 'new_vehicle_internet' })
+  @IsOptional()
+  @Matches(/^[a-z][a-z0-9_]{0,49}$/)
+  leadType?: string;
+  @ApiProperty({
+    required: false,
+    default: true,
+    description: 'False rejects historical replays rather than enrolling them',
+  })
+  @IsOptional()
+  @IsBoolean()
+  isNewLead?: boolean;
+  @ApiProperty({
+    required: false,
+    description:
+      'Explicit enquiry consent; absent defaults to enquiry response unless strict consent is enabled',
+  })
+  @IsOptional()
+  @IsBoolean()
+  enquiryConsent?: boolean;
+  @ApiProperty({ required: false, default: false })
+  @IsOptional()
+  @IsBoolean()
+  marketingConsent?: boolean;
+  @ApiProperty({ required: false, description: 'Consent evidence/reference' })
+  @IsOptional()
+  @IsString()
+  consentEvidence?: string;
   @ApiProperty({
     example: 'DS-OPP-99281',
     description: 'DealerSocket Opportunity ID (System of Record identifier)',
@@ -98,7 +138,8 @@ export class IngestLeadDto {
   @ApiProperty({
     enum: RooftopId,
     example: RooftopId.CRANBOURNE_KIA,
-    description: 'Rooftop entity (Cranbourne Kia, Cranbourne MG, Geely Cranbourne)',
+    description:
+      'Rooftop entity (Cranbourne Kia, Cranbourne MG, Geely Cranbourne)',
   })
   @IsNotEmpty()
   @IsEnum(RooftopId)
@@ -116,7 +157,10 @@ export class IngestLeadDto {
   @Type(() => LeadVehicleDto)
   vehicle?: LeadVehicleDto;
 
-  @ApiProperty({ example: 'carsales', description: 'Lead source (e.g. carsales, website, fb, walk-in)' })
+  @ApiProperty({
+    example: 'carsales',
+    description: 'Lead source (e.g. carsales, website, fb, walk-in)',
+  })
   @IsNotEmpty()
   @IsString()
   leadSource: string;
@@ -129,6 +173,6 @@ export class IngestLeadDto {
 
   @ApiProperty({ example: '2026-10-12T16:00:00Z', required: false })
   @IsOptional()
-  @IsString()
+  @IsDateString()
   receivedAt?: string;
 }

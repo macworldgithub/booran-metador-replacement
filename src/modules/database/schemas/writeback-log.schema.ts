@@ -5,6 +5,8 @@ export type WritebackLogDocument = HydratedDocument<WritebackLog>;
 
 @Schema({ collection: 'writeback_logs', timestamps: true, versionKey: false })
 export class WritebackLog {
+  @Prop({ default: false }) simulated: boolean;
+  @Prop({ index: true }) nextAttemptAt?: Date;
   @Prop({ required: true, unique: true, index: true })
   id: string;
 

@@ -25,16 +25,26 @@ export class AuthService implements OnModuleInit {
   async onModuleInit() {
     const count = await this.userModel.countDocuments();
     if (count === 0) {
-      const passwordHash = await bcrypt.hash('Admin@2026!', 12);
+      const email = process.env.BOOTSTRAP_ADMIN_EMAIL || 'admin@booran.com.au';
+      const password =
+        process.env.BOOTSTRAP_ADMIN_PASSWORD ||
+        (process.env.NODE_ENV === 'production' ? '' : 'Admin@2026!');
+      if (process.env.NODE_ENV === 'production' && password.length < 12)
+        throw new Error(
+          'Configure BOOTSTRAP_ADMIN_PASSWORD with at least 12 characters before first production startup',
+        );
+      const passwordHash = await bcrypt.hash(password, 12);
       await this.userModel.create({
-        email: 'admin@booran.com.au',
+        email,
         passwordHash,
         name: 'Group Admin',
         role: UserRole.GROUP_ADMIN,
         rooftopIds: Object.values(RooftopId),
         isActive: true,
       });
-      this.logger.log('🔑 Default admin seeded → admin@booran.com.au / Admin@2026!');
+      this.logger.log(
+        'Initial Group Admin created. Credentials are not logged.',
+      );
     }
   }
 
@@ -46,7 +56,8 @@ export class AuthService implements OnModuleInit {
     if (!user) throw new UnauthorizedException('Invalid email or password');
 
     const passwordMatch = await bcrypt.compare(dto.password, user.passwordHash);
-    if (!passwordMatch) throw new UnauthorizedException('Invalid email or password');
+    if (!passwordMatch)
+      throw new UnauthorizedException('Invalid email or password');
 
     const payload = {
       sub: (user as any)._id.toString(),
