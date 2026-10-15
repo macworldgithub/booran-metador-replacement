@@ -7,6 +7,7 @@ import {
 } from '@nestjs/swagger';
 import { LeadsService } from './leads.service';
 import { IngestLeadDto } from './dto/ingest-lead.dto';
+import { ConnectorHeartbeatDto } from './dto/connector-heartbeat.dto';
 import { Public } from '../auth/decorators/public.decorator';
 
 @ApiTags('Lead Intake')
@@ -28,5 +29,15 @@ export class LeadsController {
   })
   async ingestLead(@Body() dto: IngestLeadDto) {
     return this.leadsService.ingestLead(dto);
+  }
+
+  @Public()
+  @ApiSecurity('leadForward')
+  @Post('connector-heartbeat')
+  @ApiOperation({
+    summary: 'Record the read-only DealerSocket scraper worker health',
+  })
+  connectorHeartbeat(@Body() dto: ConnectorHeartbeatDto) {
+    return this.leadsService.connectorHeartbeat(dto);
   }
 }

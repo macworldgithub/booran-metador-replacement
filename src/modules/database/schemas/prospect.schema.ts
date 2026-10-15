@@ -10,6 +10,14 @@ export type ProspectDocument = HydratedDocument<Prospect>;
 
 @Schema({ collection: 'prospects', timestamps: true, versionKey: false })
 export class Prospect {
+  @Prop({ type: Object })
+  sourceSync?: {
+    mode: 'lead_forward' | 'live_scrape' | 'backfill';
+    fingerprint?: string;
+    scrapedAt?: Date;
+    sourceUrl?: string;
+  };
+
   @Prop() receivedAt?: Date;
   @Prop({ default: 'new_vehicle_internet' }) leadType?: string;
   @Prop({ type: Object }) consent?: Record<string, any>;

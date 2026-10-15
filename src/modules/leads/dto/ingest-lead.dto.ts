@@ -9,6 +9,7 @@ import {
   IsBoolean,
   IsDateString,
   Matches,
+  IsIn,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { RooftopId } from '../../../common/enums';
@@ -90,6 +91,39 @@ export class LeadSalespersonDto {
 }
 
 export class IngestLeadDto {
+  @ApiProperty({
+    required: false,
+    default: true,
+    description:
+      'Explicitly authorises SMS journey enrolment. Read-only scraper syncs set this false.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  startJourney?: boolean;
+
+  @ApiProperty({
+    required: false,
+    enum: ['lead_forward', 'live_scrape', 'backfill'],
+  })
+  @IsOptional()
+  @IsIn(['lead_forward', 'live_scrape', 'backfill'])
+  syncMode?: 'lead_forward' | 'live_scrape' | 'backfill';
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  sourceFingerprint?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsDateString()
+  scrapedAt?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  sourceUrl?: string;
+
   @ApiProperty({ required: false, default: 'new_vehicle_internet' })
   @IsOptional()
   @Matches(/^[a-z][a-z0-9_]{0,49}$/)

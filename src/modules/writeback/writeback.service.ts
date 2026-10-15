@@ -26,6 +26,7 @@ export class WritebackService {
     const clientSecret = process.env.DS_CLIENT_SECRET;
 
     this.isConfigured = !!(
+      process.env.DEALERSOCKET_WRITEBACK_ENABLED === 'true' &&
       clientId &&
       clientSecret &&
       !clientId.startsWith('xxx') &&
@@ -45,7 +46,7 @@ export class WritebackService {
       this.logger.log(`DealerSocket Solera API client configured (${baseUrl})`);
     } else {
       this.logger.log(
-        'DealerSocket credentials not provided. Write-back service running in simulation mode with full persistent audit trail.',
+        'DealerSocket write-back is disabled. Read-only mode remains active unless DEALERSOCKET_WRITEBACK_ENABLED=true and verified credentials/path are configured.',
       );
     }
   }

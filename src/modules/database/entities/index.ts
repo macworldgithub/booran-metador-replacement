@@ -55,6 +55,12 @@ export interface JourneyState {
 }
 
 export interface ProspectEntity {
+  sourceSync?: {
+    mode: 'lead_forward' | 'live_scrape' | 'backfill';
+    fingerprint?: string;
+    scrapedAt?: Date;
+    sourceUrl?: string;
+  };
   receivedAt?: Date;
   leadType?: string;
   consent?: {

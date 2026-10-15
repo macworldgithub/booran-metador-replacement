@@ -32,6 +32,31 @@ export class OperationsController {
     private readonly service: OperationsService,
     private readonly store: StoreService,
   ) {}
+  @ApiTags('DealerSocket Integration')
+  @Get('integrations/dealersocket/status')
+  @ApiOperation({ summary: 'Read the latest live scraper heartbeat' })
+  async dealerSocketStatus() {
+    const record = await this.store.recordGet(
+      'connector_status',
+      'dealersocket',
+    );
+    if (!record?.data)
+      return {
+        status: 'never_connected',
+        readOnly: true,
+        recordsSeen: 0,
+        recordsChanged: 0,
+        recordsSent: 0,
+        errors: 0,
+      };
+    const completed = new Date(record.data.pollCompletedAt).getTime();
+    const interval = Number(record.data.intervalSeconds);
+    const stale =
+      Number.isFinite(completed) &&
+      Number.isFinite(interval) &&
+      Date.now() - completed > interval * 2500;
+    return { ...record.data, status: stale ? 'failed' : record.data.status };
+  }
   @ApiTags('System Settings')
   @Roles(UserRole.GROUP_ADMIN)
   @Get('settings')

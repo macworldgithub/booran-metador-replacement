@@ -12,6 +12,7 @@ import { JourneyService } from '../journey/journey.service';
 import { WritebackService } from '../writeback/writeback.service';
 import { PhoneNormalizer } from '../../common/utils/phone-normalizer.util';
 import { IngestLeadDto } from './dto/ingest-lead.dto';
+import { ConnectorHeartbeatDto } from './dto/connector-heartbeat.dto';
 import { ProspectStatus, ThreadEventType } from '../../common/enums';
 import { ProspectEntity } from '../database/entities';
 
@@ -27,7 +28,7 @@ export class LeadsService {
   ) {}
 
   async ingestLead(dto: IngestLeadDto) {
-    if (dto.isNewLead === false)
+    if (dto.isNewLead === false && dto.startJourney !== false)
       throw new BadRequestException('Historical lead replays are not in scope');
     const keys = [
       `intake:opp:${dto.dealerSocketOpportunityId}`,
@@ -48,17 +49,37 @@ export class LeadsService {
     }
   }
 
-  private async ingestLocked(dto: IngestLeadDto) {
-    await this.store.refreshRooftops();
-    const settings = await this.store.getSettings();
-    const existing = await this.store.findProspectByOpportunityId(
-      dto.dealerSocketOpportunityId,
-    );
-    if (existing) {
-      if (existing.rooftopId !== dto.rooftopId)
-        throw new ConflictException(
-          'This opportunity belongs to a different rooftop; check the entity map',
-        );
+  async connectorHeartbeat(dto: ConnectorHeartbeatDto) {
+    if (!dto.readOnly)
+      throw new BadRequestException(
+        'This connector is authorised for read-only DealerSocket access only',
+      );
+    await this.store.recordSave('connector_status', 'dealersocket', {
+      ...dto,
+      receivedAt: new Date(),
+    });
+    return { ok: true };
+  }
+
+  private sourceSync(dto: IngestLeadDto) {
+    const scrapedAt = dto.scrapedAt ? new Date(dto.scrapedAt) : new Date();
+    return {
+      mode: dto.syncMode ?? 'lead_forward',
+      fingerprint: dto.sourceFingerprint,
+      scrapedAt: Number.isNaN(scrapedAt.getTime()) ? new Date() : scrapedAt,
+      sourceUrl: dto.sourceUrl,
+    };
+  }
+
+  private async mergeExisting(
+    existing: ProspectEntity,
+    dto: IngestLeadDto,
+  ) {
+    if (existing.rooftopId !== dto.rooftopId)
+      throw new ConflictException(
+        'This opportunity belongs to a different rooftop; check the entity map',
+      );
+    if (!['live_scrape', 'backfill'].includes(dto.syncMode ?? '')) {
       await this.store.addEvent({
         id: `sys_${randomUUID()}`,
         prospectId: existing.id,
@@ -73,6 +94,59 @@ export class LeadsService {
       );
       return { intakeStatus: 'duplicate_merged', prospect: existing };
     }
+    if (
+      dto.sourceFingerprint &&
+      existing.sourceSync?.fingerprint === dto.sourceFingerprint
+    )
+      return { intakeStatus: 'sync_unchanged', prospect: existing };
+
+    const phone = PhoneNormalizer.normalizeAustralianPhone(dto.customer.mobile);
+    const receivedAt = dto.receivedAt ? new Date(dto.receivedAt) : undefined;
+    const updated = await this.store.updateProspect(existing.id, {
+      dealerSocketCustomerId:
+        dto.dealerSocketCustomerId ?? existing.dealerSocketCustomerId,
+      customer: dto.customer,
+      normalizedMobile: phone.normalized ?? existing.normalizedMobile,
+      vehicle: dto.vehicle ?? existing.vehicle,
+      leadSource: dto.leadSource,
+      assignedTo: dto.salesperson
+        ? {
+            name: dto.salesperson.name || 'Unassigned',
+            email: dto.salesperson.email,
+          }
+        : existing.assignedTo,
+      receivedAt:
+        receivedAt && !Number.isNaN(receivedAt.getTime())
+          ? receivedAt
+          : existing.receivedAt,
+      sourceSync: this.sourceSync(dto),
+    });
+    await this.store.addEvent({
+      id: `sys_${randomUUID()}`,
+      prospectId: existing.id,
+      type: ThreadEventType.SYSTEM,
+      direction: 'internal',
+      content: `DealerSocket opportunity #${dto.dealerSocketOpportunityId} was refreshed by the read-only live sync.`,
+      metadata: {
+        syncMode: dto.syncMode ?? 'lead_forward',
+        sourceFingerprint: dto.sourceFingerprint,
+      },
+      timestamp: new Date(),
+    });
+    return { intakeStatus: 'synced_update', prospect: updated };
+  }
+
+  private async ingestLocked(dto: IngestLeadDto) {
+    await this.store.refreshRooftops();
+    const settings = await this.store.getSettings();
+    const existing = await this.store.findProspectByOpportunityId(
+      dto.dealerSocketOpportunityId,
+    );
+    if (existing) {
+      return this.mergeExisting(existing, dto);
+    }
+    const automationRequested =
+      dto.startJourney !== false && dto.isNewLead !== false;
     const receivedAt = dto.receivedAt ? new Date(dto.receivedAt) : new Date();
     if (
       Number.isNaN(receivedAt.getTime()) ||
@@ -86,6 +160,7 @@ export class LeadsService {
         'Explicit consent requires an evidence/reference',
       );
     const leadFields = {
+      sourceSync: this.sourceSync(dto),
       receivedAt,
       leadType: dto.leadType ?? 'new_vehicle_internet',
       consent: {
@@ -307,12 +382,17 @@ export class LeadsService {
         : undefined,
       status: ProspectStatus.NEW,
       journey: {
-        status: 'active',
+        status: automationRequested ? 'active' : 'paused',
         currentStep: 0,
-        currentStepName: 'Pending Step 1',
-        nextScheduledStepAt: nextOpen(
-          this.store.getRooftopById(dto.rooftopId)!,
-        ),
+        currentStepName: automationRequested
+          ? 'Pending Step 1'
+          : 'DealerSocket Sync (Read-Only)',
+        pausedReason: automationRequested
+          ? undefined
+          : 'Live DealerSocket Sync - Read Only (SMS Disabled)',
+        nextScheduledStepAt: automationRequested
+          ? nextOpen(this.store.getRooftopById(dto.rooftopId)!)
+          : undefined,
       },
       unreadInboundCount: 0,
       lastActivityAt: new Date(),
@@ -321,6 +401,36 @@ export class LeadsService {
     };
 
     await this.store.saveProspect(newProspect);
+
+    if (!automationRequested) {
+      await this.store.addEvent({
+        id: `sys_${randomUUID()}`,
+        prospectId: newProspect.id,
+        type: ThreadEventType.SYSTEM,
+        direction: 'internal',
+        content: `Lead synced from DealerSocket Opportunities (Opp #${dto.dealerSocketOpportunityId}). Read-only sync active; SMS disabled.`,
+        metadata: {
+          syncMode: dto.syncMode ?? 'live_scrape',
+          sourceFingerprint: dto.sourceFingerprint,
+        },
+        timestamp: new Date(),
+      });
+      if (dto.vehicle?.comments?.trim()) {
+        await this.store.addEvent({
+          id: `note_${randomUUID()}`,
+          prospectId: newProspect.id,
+          type: ThreadEventType.INTERNAL_NOTE,
+          direction: 'internal',
+          content: dto.vehicle.comments.trim(),
+          authorName: 'DealerSocket Intake',
+          timestamp: receivedAt,
+        });
+      }
+      return {
+        intakeStatus: 'synced_read_only',
+        prospect: await this.store.findProspectById(newProspect.id),
+      };
+    }
 
     // 6. Check send hours, trigger Step 1 or queue
     const rooftop = this.store.getRooftopById(dto.rooftopId)!;

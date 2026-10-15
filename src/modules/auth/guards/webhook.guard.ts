@@ -19,7 +19,13 @@ export class WebhookGuard implements CanActivate {
   canActivate(context: ExecutionContext) {
     const request = context.switchToHttp().getRequest();
     const path = request.path.replace(/\/$/, '');
-    if (['/api/leads/ingest', '/api/leads/ingest-adf'].includes(path)) {
+    if (
+      [
+        '/api/leads/ingest',
+        '/api/leads/ingest-adf',
+        '/api/leads/connector-heartbeat',
+      ].includes(path)
+    ) {
       const secret = process.env.LEAD_FORWARD_SECRET;
       if (!secret)
         throw new ServiceUnavailableException(
