@@ -11,6 +11,7 @@ import { ConversationsModule } from './modules/conversations/conversations.modul
 import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
 import { OperationsModule } from './modules/operations/operations.module';
+import { DealerSocketModule } from './modules/dealersocket/dealersocket.module';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { OperationsModule } from './modules/operations/operations.module';
     AuthModule,
     UsersModule,
     OperationsModule,
+    DealerSocketModule,
     RooftopsModule,
     ComplianceModule,
     SmsModule,
