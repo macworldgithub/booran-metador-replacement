@@ -152,13 +152,6 @@ export class JourneyDraftDto {
   @Type(() => JourneyStepDto)
   steps: JourneyStepDto[];
 }
-export class TemplateDto {
-  @ApiProperty({ enum: RooftopId }) @IsEnum(RooftopId) rooftopId: RooftopId;
-  @ApiProperty() @IsString() @Matches(/\S/) @MaxLength(120) name: string;
-  @ApiProperty() @IsString() @Matches(/\S/) @MaxLength(80) category: string;
-  @ApiProperty() @IsString() @Matches(/\S/) @MaxLength(1400) content: string;
-  @ApiProperty({ default: true }) @IsBoolean() active: boolean;
-}
 export class ReportQueryDto {
   @ApiPropertyOptional({ enum: RooftopId })
   @IsOptional()

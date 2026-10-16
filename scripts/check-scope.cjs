@@ -45,18 +45,17 @@ async function run() {
   try {
     const document = SwaggerModule.createDocument(app, new DocumentBuilder().addBearerAuth().build());
     const required = {
-      '/api/settings': ['get', 'patch'], '/api/rooftops/{id}': ['patch'],
+      '/api/rooftops/{id}': ['patch'],
       '/api/journeys': ['get', 'post'], '/api/journeys/{id}': ['patch'],
       '/api/journeys/{id}/publish': ['post'], '/api/journeys/{id}/activate': ['post'], '/api/journeys/{id}/pause': ['post'],
-      '/api/templates': ['get', 'post'], '/api/templates/{id}': ['patch', 'delete'],
       '/api/prospects/{id}/consent': ['patch'], '/api/tasks': ['get'], '/api/tasks/{id}': ['patch'],
       '/api/notifications': ['get'], '/api/notifications/{id}/read': ['patch'],
       '/api/reports/journey-performance': ['get'], '/api/compliance/send-audit': ['get'],
-      '/api/compliance/activity-audit': ['get'], '/api/settings/retention-preview': ['get'],
+      '/api/compliance/activity-audit': ['get'],
     };
     for (const [path, methods] of Object.entries(required)) for (const method of methods) assert.ok(document.paths[path]?.[method], `${method} ${path} must appear in Swagger`);
-    for (const name of ['JourneyDraftDto', 'JourneyStepDto', 'PlatformSettingsDto', 'RooftopSettingsDto', 'TemplateDto', 'ConsentDto']) assert.ok(document.components.schemas[name], `${name} must have a Swagger schema`);
-    console.log('Offline scope checks passed: calendar/DST, validation, footer, access rules and 22 Swagger operations. No live APIs/database were used.');
+    for (const name of ['JourneyDraftDto', 'JourneyStepDto', 'RooftopSettingsDto', 'ConsentDto']) assert.ok(document.components.schemas[name], `${name} must have a Swagger schema`);
+    console.log('Offline scope checks passed: calendar/DST, validation, footer, access rules and active Swagger operations.');
   } finally { await app.close(); }
 }
 run().catch((error) => { console.error(error); process.exitCode = 1; });

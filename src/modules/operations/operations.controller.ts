@@ -17,12 +17,10 @@ import { OperationsService } from './operations.service';
 import {
   ConsentDto,
   JourneyDraftDto,
-  PlatformSettingsDto,
-  ReportQueryDto,
+    ReportQueryDto,
   RooftopSettingsDto,
   TaskStatusDto,
-  TemplateDto,
-} from './dto';
+  } from './dto';
 import { StoreService } from '../database/store.service';
 
 @ApiBearerAuth()
@@ -56,26 +54,6 @@ export class OperationsController {
       Number.isFinite(interval) &&
       Date.now() - completed > interval * 2500;
     return { ...record.data, status: stale ? 'failed' : record.data.status };
-  }
-  @ApiTags('System Settings')
-  @Roles(UserRole.GROUP_ADMIN)
-  @Get('settings')
-  @ApiOperation({
-    summary:
-      'Read duplicate window, consent, retention and entity mapping settings',
-  })
-  settings() {
-    return this.store.getSettings();
-  }
-  @ApiTags('System Settings')
-  @Roles(UserRole.GROUP_ADMIN)
-  @Patch('settings')
-  @ApiOperation({ summary: 'Update persisted platform settings' })
-  saveSettings(
-    @Body() dto: PlatformSettingsDto,
-    @CurrentUser() user: PortalActor,
-  ) {
-    return this.service.saveSettings(dto, user);
   }
   @ApiTags('Rooftops')
   @Roles(UserRole.GROUP_ADMIN)
@@ -142,41 +120,6 @@ export class OperationsController {
   })
   pause(@Param('id') id: string, @CurrentUser() user: PortalActor) {
     return this.service.toggleJourney(id, false, user);
-  }
-  @ApiTags('Template Library')
-  @Get('templates')
-  @ApiOperation({
-    summary: 'List templates scoped to the authenticated rooftops',
-  })
-  templates(@Query() query: ReportQueryDto, @CurrentUser() user: PortalActor) {
-    return this.service.templates(user, query.rooftopId);
-  }
-  @ApiTags('Template Library')
-  @Roles(UserRole.GROUP_ADMIN)
-  @Post('templates')
-  @ApiOperation({ summary: 'Create a staff SMS template' })
-  templateCreate(@Body() dto: TemplateDto, @CurrentUser() user: PortalActor) {
-    return this.service.saveTemplate(undefined, dto, user);
-  }
-  @ApiTags('Template Library')
-  @Roles(UserRole.GROUP_ADMIN)
-  @Patch('templates/:id')
-  @ApiOperation({
-    summary: 'Update a template without modifying sent messages',
-  })
-  templateUpdate(
-    @Param('id') id: string,
-    @Body() dto: TemplateDto,
-    @CurrentUser() user: PortalActor,
-  ) {
-    return this.service.saveTemplate(id, dto, user);
-  }
-  @ApiTags('Template Library')
-  @Roles(UserRole.GROUP_ADMIN)
-  @Delete('templates/:id')
-  @ApiOperation({ summary: 'Archive a template' })
-  templateDelete(@Param('id') id: string, @CurrentUser() user: PortalActor) {
-    return this.service.archiveTemplate(id, user);
   }
   @ApiTags('Conversation Portal')
   @Patch('prospects/:id/consent')
@@ -249,14 +192,5 @@ export class OperationsController {
   })
   audit() {
     return this.store.recordList('audit');
-  }
-  @ApiTags('System Settings')
-  @Roles(UserRole.GROUP_ADMIN)
-  @Get('settings/retention-preview')
-  @ApiOperation({
-    summary: 'Preview expired completed/stopped records; no deletion',
-  })
-  retention() {
-    return this.store.retentionPreview();
   }
 }

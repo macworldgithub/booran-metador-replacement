@@ -13,11 +13,9 @@ import { RooftopId, UserRole } from '../../common/enums';
 import {
   ConsentDto,
   JourneyDraftDto,
-  PlatformSettingsDto,
-  ReportQueryDto,
+    ReportQueryDto,
   RooftopSettingsDto,
-  TemplateDto,
-} from './dto';
+  } from './dto';
 import { defaultJourneySteps } from '../journey/default-journey';
 
 @Injectable()
@@ -61,19 +59,6 @@ export class OperationsService implements OnModuleInit {
     if (rooftopId && !ids.includes(rooftopId))
       throw new ForbiddenException('No access to this rooftop');
     return rooftopId ? [rooftopId] : ids;
-  }
-  async saveSettings(dto: PlatformSettingsDto, user: PortalActor) {
-    if (
-      Object.values(dto.entityMap).some(
-        (id) => !Object.values(RooftopId).includes(id),
-      )
-    )
-      throw new BadRequestException(
-        'entityMap values must be valid rooftop IDs',
-      );
-    const result = await this.store.recordSave('settings', 'platform', dto);
-    await this.store.audit('settings_updated', user, dto);
-    return result!.data;
   }
   async saveRooftop(id: RooftopId, dto: RooftopSettingsDto, user: PortalActor) {
     if (!Object.values(RooftopId).includes(id))
@@ -230,45 +215,6 @@ export class OperationsService implements OnModuleInit {
     } finally {
       await this.store.releaseLease(`publish:${key}`, owner);
     }
-  }
-  async templates(user: PortalActor, rooftopId?: RooftopId) {
-    return this.store.recordList('template', {
-      'data.rooftopId': { $in: this.scope(user, rooftopId) },
-      ...(user.role !== UserRole.GROUP_ADMIN ? { 'data.active': true } : {}),
-    });
-  }
-  async saveTemplate(
-    id: string | undefined,
-    dto: TemplateDto,
-    user: PortalActor,
-  ) {
-    if (id && !(await this.store.recordGet('template', id)))
-      throw new NotFoundException('Template not found');
-    this.validateSteps({
-      rooftopId: dto.rooftopId,
-      name: dto.name,
-      leadType: 'template',
-      steps: [
-        {
-          name: dto.name,
-          template: dto.content,
-          delayType: 'immediate',
-          delayValue: 0,
-        },
-      ],
-    });
-    const result = await this.store.recordSave(
-      'template',
-      id ?? randomUUID(),
-      dto,
-    );
-    await this.store.audit('template_saved', user, { id: result!.key });
-    return result;
-  }
-  async archiveTemplate(id: string, user: PortalActor) {
-    const current = await this.store.recordGet('template', id);
-    if (!current) throw new NotFoundException('Template not found');
-    return this.saveTemplate(id, { ...current.data, active: false }, user);
   }
   async accessibleProspect(id: string, user: PortalActor) {
     const prospect = await this.store.findProspectById(id);

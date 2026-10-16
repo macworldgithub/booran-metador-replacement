@@ -6,7 +6,6 @@ import { WritebackModule } from '../writeback/writeback.module';
 
 @Module({
   imports: [ComplianceModule, WritebackModule],
-  controllers: [SmsController],
   providers: [SmsService],
   exports: [SmsService],
 })
