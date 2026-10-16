@@ -8,6 +8,8 @@ import { StoreService } from '../src/modules/database/store.service';
 import { RolesGuard } from '../src/modules/auth/guards/roles.guard';
 import { sanitizeLiveLeads } from '../src/modules/dealersocket/live-leads';
 import { RooftopId, UserRole } from '../src/common/enums';
+import { OperationsController } from '../src/modules/operations/operations.controller';
+import { OperationsService } from '../src/modules/operations/operations.service';
 
 const snapshot = {
   state: 'connected', operation: null, lastCheckedAt: '2026-10-15T09:00:00Z',
@@ -23,8 +25,10 @@ describe('DealerSocket session API (offline; no browser/database)', () => {
   const audit = jest.fn().mockResolvedValue({});
   const saved = { key: process.env.DEALERSOCKET_CONNECTOR_KEY, url: process.env.DEALERSOCKET_CONNECTOR_URL };
   beforeAll(async () => {
-    const module = await Test.createTestingModule({ imports: [DealerSocketModule] })
-      .useMocker(token => token === StoreService ? { audit } : undefined).compile();
+    // Register OperationsController too: its legacy heartbeat must never shadow session status.
+    const module = await Test.createTestingModule({ imports: [DealerSocketModule], controllers: [OperationsController] })
+      .useMocker(token => token === StoreService ? { audit, recordGet: jest.fn().mockResolvedValue(null) } :
+        token === OperationsService ? {} : undefined).compile();
     app = module.createNestApplication({ logger: false });
     // Synthetic identities test this module's real RolesGuard; existing JWT validation is unchanged.
     app.useGlobalGuards({ canActivate(context) {
@@ -62,6 +66,23 @@ describe('DealerSocket session API (offline; no browser/database)', () => {
     expect(upstream).toHaveBeenCalledWith(expect.objectContaining({ method: 'POST', maxRedirects: 0,
       headers: expect.objectContaining({ 'X-Connector-Key': process.env.DEALERSOCKET_CONNECTOR_KEY }) }));
     expect(audit).toHaveBeenCalledWith('dealersocket_session_requested', expect.any(Object), { action: 'check' });
+  });
+  it('keeps session status separate from the legacy scraper heartbeat', async () => {
+    const upstream = jest.spyOn(axios, 'request').mockResolvedValue({ data: snapshot });
+    const status = await request(app.getHttpServer()).get('/api/integrations/dealersocket/status').set('x-test-role', 'group_admin').expect(200);
+    expect(status.body).toEqual(snapshot);
+    expect(upstream).toHaveBeenCalledTimes(1);
+    const heartbeat = await request(app.getHttpServer()).get('/api/integrations/dealersocket/heartbeat/status').set('x-test-role', 'group_admin').expect(200);
+    expect(heartbeat.body.status).toBe('never_connected');
+    await request(app.getHttpServer()).get('/api/integrations/dealersocket/heartbeat/status').set('x-test-role', 'salesperson').expect(403);
+    expect(upstream).toHaveBeenCalledTimes(1);
+  });
+  it('accepts lead-read activity without rewriting verification timestamps', async () => {
+    const reading = {...snapshot,state:'connecting',operation:'read',message:'Lead read in progress. Session checks resume when it finishes.',
+      rooftops:snapshot.rooftops.map(roof=>({...roof,verified:false}))};
+    jest.spyOn(axios,'request').mockResolvedValue({data:reading});
+    const response = await request(app.getHttpServer()).get('/api/integrations/dealersocket/status').set('x-test-role','group_admin').expect(200);
+    expect(response.body).toEqual(reading);
   });
   it('fails closed for missing configuration and remote cleartext connectors', async () => {
     const upstream = jest.spyOn(axios, 'request');

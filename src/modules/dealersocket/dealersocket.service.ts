@@ -7,7 +7,7 @@ import { sanitizeLiveLeads } from './live-leads';
 export const connectionStates = ['disconnected', 'connecting', 'connected', 'login_required', 'error'] as const;
 export interface ConnectionStatus {
   state: typeof connectionStates[number];
-  operation: 'login' | 'check' | null;
+  operation: 'login' | 'check' | 'read' | null;
   lastCheckedAt: string | null;
   lastConnectedAt: string | null;
   errorCode: string | null;
@@ -27,7 +27,7 @@ export function sanitizeConnection(value: unknown): ConnectionStatus {
   const data = value as Partial<ConnectionStatus> | null;
   const validDate = (value: unknown) => value === null || typeof value === 'string' && Number.isFinite(Date.parse(value));
   if (!data || !connectionStates.includes(data.state!) ||
-    ![null, 'login', 'check'].includes(data.operation!) ||
+    ![null, 'login', 'check', 'read'].includes(data.operation!) ||
     !validDate(data.lastCheckedAt) || !validDate(data.lastConnectedAt) || !validDate(data.sessionExpiresAt) ||
     typeof data.message !== 'string' || data.message.length > 500 ||
     !(data.errorCode === null || typeof data.errorCode === 'string' && /^[a-z_]{1,60}$/.test(data.errorCode)) ||

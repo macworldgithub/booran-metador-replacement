@@ -31,7 +31,8 @@ export class OperationsController {
     private readonly store: StoreService,
   ) {}
   @ApiTags('DealerSocket Integration')
-  @Get('integrations/dealersocket/status')
+  @Roles(UserRole.GROUP_ADMIN)
+  @Get('integrations/dealersocket/heartbeat/status')
   @ApiOperation({ summary: 'Read the latest live scraper heartbeat' })
   async dealerSocketStatus() {
     const record = await this.store.recordGet(
