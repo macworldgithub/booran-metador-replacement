@@ -75,9 +75,9 @@ These are configuration names, not credentials; no existing `.env` was modified.
 | Variable | Purpose |
 | --- | --- |
 | `LEAD_FORWARD_SECRET` | Shared secret required in `x-lead-forward-token` for both intake endpoints |
-| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | Real carrier credentials |
-| `WEBHOOK_PUBLIC_BASE_URL` | Exact externally visible origin (for example the HTTPS backend domain) used for Twilio signature verification |
-| `TWILIO_STATUS_CALLBACK_URL` | Public `/api/sms/delivery-receipt` callback URL |
+| `MOBILEMESSAGE_API_USERNAME`, `MOBILEMESSAGE_API_PASSWORD` | Mobile Message Basic auth credentials |
+| `MOBILEMESSAGE_WEBHOOK_SECRET` | Shared signing secret; raw-body HMAC verification |
+| `MOBILEMESSAGE_ENABLED` | Explicit outbound enablement; defaults to disabled |
 | `WEBHOOK_TEST_TOKEN` | Optional development-only `x-webhook-test-token` for Swagger normalized webhook requests; disabled in production |
 | `PORTAL_PUBLIC_URL` | Real frontend origin used in CRM thread links |
 | `DS_API_BASE_URL`, `DS_CLIENT_ID`, `DS_CLIENT_SECRET` | Approved DealerSocket partner endpoint/credentials |
@@ -86,7 +86,7 @@ These are configuration names, not credentials; no existing `.env` was modified.
 | `JWT_SECRET` | Production requires at least 32 characters |
 | `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD` | First production administrator; password must have at least 12 characters |
 
-Native Twilio form payloads are accepted: `From`, `To`, `Body`, `MessageSid`, `NumMedia`, `MediaUrlN`; callbacks accept `MessageSid`, `MessageStatus`, `ErrorCode`, `ErrorMessage`. Signature verification uses the original form body. Native inbound responses return empty TwiML. Unknown receiving numbers are rejected. Webhook authentication is fail-closed if configuration is absent. JWT is not a replacement for carrier signature verification.
+Mobile Message JSON webhooks use `/api/sms/inbound` and `/api/sms/delivery-receipt`. Signed requests are persisted before acknowledgement, then processed by the durable inbox worker. See [Mobile Message deployment and acceptance](mobile-message.md) for payload, queue, signature, retry and opt-out configuration details.
 
 DealerSocket's actual authentication, activity schema and assignment schema are discovery-gated. The included configurable adapter sends a structured SMS activity (`type`, `action`, `note`, `timestamp`) and assignment (`assignedTo`). **These request schemas must be confirmed against the approved partner contract before live enablement; changing the URL alone does not prove compatibility.** No live DealerSocket or SMS requests were made during implementation.
 

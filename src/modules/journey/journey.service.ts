@@ -90,6 +90,8 @@ export class JourneyService {
     await this.processDueProspect(prospect);
   }
   async processDueProspect(snapshot: ProspectEntity): Promise<boolean> {
+    // One-way handset testing must not activate commercial SMS journeys.
+    if (process.env.MOBILEMESSAGE_TEST_RECIPIENT) return false;
     const lock = `prospect:${snapshot.id}`;
     const owner = await this.store.lease(lock, 120);
     if (!owner) return false;

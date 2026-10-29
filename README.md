@@ -1,3 +1,7 @@
+## Mobile Message SMS
+
+See [SMS configuration, webhook setup and acceptance testing](docs/mobile-message.md). Outbound sending defaults to disabled; Twilio is no longer used.
+
 <p align="center">
   <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
 </p>

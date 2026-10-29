@@ -1,4 +1,5 @@
 import 'dotenv/config'; // Must be first — loads .env before any module import
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { NestFactory, Reflector } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
@@ -16,14 +17,16 @@ async function bootstrap() {
     throw new Error(
       'Production requires a JWT_SECRET of at least 32 characters',
     );
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    rawBody: true,
+  });
 
   app.enableCors();
 
   // Support XML/ADF payloads
   app.use(express.text({ type: ['text/*', 'application/xml', '*/xml'] }));
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: false }));
+  app.useBodyParser('json', { limit: '256kb' });
+  app.useBodyParser('urlencoded', { extended: false });
 
   app.useGlobalPipes(
     new ValidationPipe({

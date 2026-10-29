@@ -84,7 +84,7 @@ export function sanitizeLiveLeads(value: unknown, actor: PortalActor): LiveLeadS
     schedule: (() => {
       const schedule = raw.schedule && typeof raw.schedule === 'object' ? raw.schedule as Raw : {};
       const interval = count(schedule.intervalSeconds);
-      return { enabled: schedule.enabled === true, intervalSeconds: interval !== null && interval >= 300 && interval <= 86400 ? interval : 3600,
+      return { enabled: schedule.enabled === true, intervalSeconds: interval !== null && interval >= 300 && interval <= 86400 ? interval : 1800,
         nextRunAt: schedule.enabled === true ? date(schedule.nextRunAt) : null };
     })(),
     startedAt: date(raw.startedAt), fetchedAt: date(raw.fetchedAt), completedAt: date(raw.completedAt),

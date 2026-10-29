@@ -16,11 +16,16 @@ import {
 } from '../../common/enums';
 import { ThreadEventEntity, ProspectEntity } from '../database/entities';
 
-import twilio = require('twilio');
+import { Cron } from '@nestjs/schedule';
+import {
+  MobileMessageService,
+  MobileMessageError,
+} from './mobile-message.service';
 import { randomUUID, createHash } from 'crypto';
 import { WritebackService } from '../writeback/writeback.service';
 import { compliantMessage } from '../../common/utils/message-template';
 import { smsSegments } from '../../common/utils/sms-segments';
+import { isOpen } from '../../common/utils/business-calendar';
 
 export interface SendSmsOptions {
   prospect: ProspectEntity;
@@ -35,35 +40,331 @@ export interface SendSmsOptions {
 @Injectable()
 export class SmsService {
   private readonly logger = new Logger(SmsService.name);
-  private readonly twilioClient?: twilio.Twilio;
-
   constructor(
     private readonly store: StoreService,
     private readonly complianceService: ComplianceService,
     private readonly writebackService: WritebackService,
-  ) {
-    const accountSid = process.env.TWILIO_ACCOUNT_SID;
-    const authToken = process.env.TWILIO_AUTH_TOKEN;
-
-    if (accountSid && authToken && !accountSid.startsWith('ACxxx')) {
-      try {
-        this.twilioClient = twilio(accountSid, authToken, {
-          timeout: 10000,
-          autoRetry: false,
-        });
-        this.logger.log('Twilio SMS client initialized successfully');
-      } catch (err: any) {
-        this.logger.warn(`Failed to initialize Twilio client: ${err.message}`);
-      }
-    } else {
-      this.logger.log(
-        'Twilio credentials not configured. Running SMS service in simulation mode.',
-      );
-    }
-  }
+    private readonly provider: MobileMessageService,
+  ) {}
 
   calculateSegments(text: string) {
     return smsSegments(text);
+  }
+
+  async gatewayStatus() {
+    const inbox = await this.store.recordList('sms_inbox', {
+      'data.state': { $ne: 'done' },
+    });
+    const outbox = await this.store.recordList('sms_outbox', {
+      'data.state': { $ne: 'accepted' },
+    });
+    return {
+      provider: 'mobilemessage',
+      enabled: process.env.MOBILEMESSAGE_ENABLED === 'true',
+      credentialsConfigured: !!(
+        process.env.MOBILEMESSAGE_API_USERNAME &&
+        process.env.MOBILEMESSAGE_API_PASSWORD
+      ),
+      signatureConfigured: !!process.env.MOBILEMESSAGE_WEBHOOK_SECRET,
+      inbox: inbox.map((record) => ({
+        id: record.key,
+        state: record.data.state,
+        attempts: record.data.attempts,
+        error: record.data.error,
+      })),
+      outbox: outbox.map((record) => ({
+        eventId: record.key,
+        state: record.data.state,
+        attempts: record.data.attempts,
+      })),
+    };
+  }
+
+  private async deliverJob(id: string) {
+    const owner = await this.store.lease(`sms-send:${id}`, 90);
+    if (!owner) return;
+    try {
+      const record = await this.store.recordGet('sms_outbox', id);
+      if (!record || record.data.state !== 'pending') return;
+      const job = record.data;
+      if (job.nextAttemptAt && job.nextAttemptAt > Date.now()) return;
+      if (Date.now() - job.createdAt > 23 * 3600_000) {
+        job.state = 'review';
+        await this.store.recordSave('sms_outbox', id, job);
+        await this.store.patchSmsEvent(id, {
+          failureReason:
+            'Acceptance uncertain; manual reconciliation required. Do not resend.',
+        });
+        return;
+      }
+      const prospect = await this.store.findProspectById(job.prospectId);
+      // An interrupted request may already have reached the carrier. Do not retry
+      // after consent changes; retain it for reconciliation instead.
+      const settings = await this.store.getSettings();
+      const event =
+        (await this.store.smsEvent(id)) ??
+        (job.event ? await this.store.addEvent(job.event) : null);
+      if (!event) throw new NotFoundException('Outgoing SMS event is missing');
+      if (event?.metadata?.providerMessageId) {
+        await this.store.recordSave('sms_outbox', id, {
+          ...job,
+          state: 'accepted',
+        });
+        return;
+      }
+      const automated = event?.type === ThreadEventType.AUTOMATED_OUTBOUND;
+      if (automated && process.env.MOBILEMESSAGE_TEST_RECIPIENT) return;
+      const rooftop = prospect && this.store.getRooftopById(prospect.rooftopId);
+      if (
+        !prospect ||
+        prospect.consent?.enquiryConsent === false ||
+        (settings.requireExplicitConsent &&
+          !prospect.consent?.enquiryConsent) ||
+        (automated &&
+          ['paused', 'stopped'].includes(prospect.journey.status)) ||
+        (await this.store.isSuppressed(prospect.normalizedMobile))
+      ) {
+        job.state = job.attempts ? 'review' : 'failed';
+        await this.store.recordSave('sms_outbox', id, job);
+        await this.store.patchSmsEvent(id, {
+          deliveryStatus: job.attempts
+            ? DeliveryStatus.PENDING
+            : DeliveryStatus.FAILED,
+          failureReason:
+            'Sending stopped by consent/suppression; reconcile any previous attempt',
+        });
+        return;
+      }
+      if (automated && (!rooftop || !isOpen(rooftop))) return;
+      job.attempts++;
+      job.nextAttemptAt =
+        Date.now() +
+        Math.min(3600_000, 30_000 * 2 ** Math.min(job.attempts, 7));
+      await this.store.recordSave('sms_outbox', id, job);
+      let providerId: string;
+      try {
+        providerId = await this.provider.send(job.payload, job.key);
+      } catch (error) {
+        const retryable =
+          error instanceof MobileMessageError && error.retryable;
+        job.state = retryable ? 'pending' : 'failed';
+        await this.store.patchSmsEvent(id, {
+          ...(retryable ? {} : { deliveryStatus: DeliveryStatus.FAILED }),
+          failureReason:
+            error instanceof MobileMessageError
+              ? error.message
+              : 'SMS provider error',
+        });
+        await this.store.recordSave('sms_outbox', id, job);
+        if (!retryable && job.attempts > 1) {
+          await this.store.createTask(
+            prospect,
+            'SMS send failed; review the conversation before retrying',
+            id,
+          );
+          if (automated && prospect.journey.status === 'active')
+            await this.store.updateProspect(prospect.id, {
+              status: ProspectStatus.WAITING_ON_US,
+              journey: {
+                ...prospect.journey,
+                status: 'paused',
+                pausedReason: 'SMS provider failure',
+                nextScheduledStepAt: undefined,
+              },
+            });
+        }
+        return;
+      }
+      // Database errors after acceptance must leave the same retry key intact.
+      await this.store.patchSmsEvent(id, {
+        'metadata.providerMessageId': providerId,
+        'metadata.providerAcceptedAt': new Date().toISOString(),
+      });
+      job.state = 'accepted';
+      await this.store.recordSave('sms_outbox', id, job);
+    } finally {
+      await this.store.releaseLease(`sms-send:${id}`, owner);
+    }
+  }
+
+  async enqueueWebhook(kind: 'inbound' | 'delivery', payload: any) {
+    const strings =
+      kind === 'inbound'
+        ? ['sender', 'to', 'message', 'received_at', 'type']
+        : ['message_id', 'status', 'received_at', 'to', 'sender'];
+    if (
+      !payload ||
+      strings.some(
+        (key) => typeof payload[key] !== 'string' || !payload[key].trim(),
+      )
+    )
+      throw new BadRequestException('Invalid Mobile Message webhook fields');
+    for (const key of [
+      'custom_ref',
+      'original_custom_ref',
+      'original_message_id',
+    ]) {
+      if (
+        payload[key] != null &&
+        (typeof payload[key] !== 'string' || payload[key].length > 255)
+      )
+        throw new BadRequestException('Invalid Mobile Message reference');
+    }
+    if (
+      kind === 'inbound' &&
+      !['inbound', 'unsubscribe'].includes(payload.type)
+    )
+      throw new BadRequestException('Unknown inbound type');
+    if (
+      kind === 'delivery' &&
+      (!['sent', 'delivered', 'failed'].includes(payload.status) ||
+        !Number.isInteger(payload.part_number) ||
+        !Number.isInteger(payload.total_parts) ||
+        payload.part_number < 1 ||
+        payload.total_parts < payload.part_number ||
+        payload.total_parts > 100)
+    )
+      throw new BadRequestException('Invalid delivery status or part numbers');
+    const date = new Date(
+      payload.received_at.replace(' ', 'T') +
+        (/Z$|[+-]\d\d:\d\d$/.test(payload.received_at) ? '' : 'Z'),
+    );
+    if (!Number.isFinite(date.getTime()))
+      throw new BadRequestException('Invalid received_at');
+    const canonical = Object.fromEntries(
+      Object.keys(payload)
+        .sort()
+        .map((key) => [key, payload[key]]),
+    );
+    const id = createHash('sha256')
+      .update(kind + JSON.stringify(canonical))
+      .digest('hex');
+    await this.store.recordInsert('sms_inbox', id, {
+      kind,
+      payload,
+      receivedAt: date.toISOString(),
+      state: 'pending',
+      attempts: 0,
+    });
+    return { accepted: true };
+  }
+
+  @Cron('*/5 * * * * *')
+  async processSmsQueues() {
+    for (const record of await this.store.recordList('sms_inbox', {
+      'data.state': 'pending',
+    })) {
+      const owner = await this.store.lease(`sms-inbox:${record.key}`, 120);
+      if (!owner) continue;
+      try {
+        const fresh = await this.store.recordGet('sms_inbox', record.key);
+        if (fresh?.data.state !== 'pending') continue;
+        const data = fresh.data;
+        if (data.nextAttemptAt > Date.now()) continue;
+        try {
+          const p = data.payload;
+          if (data.kind === 'inbound') {
+            // Suppress globally even when sender routing cannot yet be resolved.
+            if (
+              !data.suppressionApplied &&
+              (p.type === 'unsubscribe' ||
+                PhoneNormalizer.isOptOutKeyword(p.message))
+            ) {
+              await this.complianceService.addSuppression(
+                p.sender,
+                'Mobile Message unsubscribe',
+                'keyword_opt_out',
+              );
+              data.suppressionApplied = true;
+              await this.store.recordSave('sms_inbox', record.key, data);
+            }
+            await this.processInboundSms(
+              p.sender,
+              p.to,
+              p.message,
+              undefined,
+              record.key,
+              p.original_custom_ref || p.original_message_id,
+              new Date(data.receivedAt),
+              p.type === 'unsubscribe',
+              true,
+              !!data.suppressionApplied,
+            );
+          } else await this.processReceipt(p, data.receivedAt);
+          data.state = 'done';
+        } catch {
+          data.attempts++;
+          data.nextAttemptAt =
+            Date.now() + Math.min(3600_000, data.attempts * 30_000);
+          if (data.attempts >= 20) data.state = 'review';
+          data.error =
+            'Webhook could not be applied; inspect routing and associated event';
+        }
+        await this.store.recordSave('sms_inbox', record.key, data);
+      } finally {
+        await this.store.releaseLease(`sms-inbox:${record.key}`, owner);
+      }
+    }
+    for (const job of await this.store.recordList('sms_outbox', {
+      'data.state': 'pending',
+    })) {
+      const key = `prospect:${job.data.prospectId}`;
+      const owner = await this.store.lease(key, 120);
+      if (!owner) continue;
+      try {
+        await this.deliverJob(job.key);
+      } finally {
+        await this.store.releaseLease(key, owner);
+      }
+    }
+  }
+
+  private async processReceipt(p: any, receivedAt: string) {
+    const event = await this.store.smsEvent(p.custom_ref || p.message_id);
+    if (!event) throw new NotFoundException('Message not yet found');
+    const normal = (phone: string) =>
+      PhoneNormalizer.normalizeAustralianPhone(phone).normalized;
+    if (
+      !normal(p.to) ||
+      normal(event.metadata?.to) !== normal(p.to) ||
+      normal(event.metadata?.from) !== normal(p.sender) ||
+      (event.metadata?.providerMessageId &&
+        event.metadata.providerMessageId !== p.message_id)
+    )
+      throw new BadRequestException('Receipt does not match message');
+    const owner = await this.store.lease(`sms-receipt:${event.id}`, 60);
+    if (!owner) throw new ConflictException('Receipt busy');
+    try {
+      const current = (await this.store.smsEvent(event.id))!;
+      const parts = current.metadata?.deliveryParts ?? {};
+      const previous = parts[p.part_number];
+      if (
+        !previous ||
+        (previous.status === 'sent' &&
+          new Date(receivedAt) >= new Date(previous.receivedAt))
+      )
+        parts[p.part_number] = { status: p.status, receivedAt };
+      const total = Math.max(current.metadata?.totalParts ?? 0, p.total_parts);
+      const entries: any[] = Object.values(parts);
+      const status = entries.some((part) => part.status === 'failed')
+        ? DeliveryStatus.FAILED
+        : Array.from(
+              { length: total },
+              (_, i) => parts[i + 1]?.status === 'delivered',
+            ).every(Boolean)
+          ? DeliveryStatus.DELIVERED
+          : DeliveryStatus.PENDING;
+      await this.store.patchSmsEvent(event.id, {
+        'metadata.deliveryParts': parts,
+        'metadata.totalParts': total,
+        'metadata.providerMessageId': p.message_id,
+        deliveryStatus: status,
+        failureReason:
+          status === DeliveryStatus.FAILED ? 'Carrier delivery failed' : null,
+      });
+    } finally {
+      await this.store.releaseLease(`sms-receipt:${event.id}`, owner);
+    }
   }
 
   async sendOutboundSms(options: SendSmsOptions): Promise<ThreadEventEntity> {
@@ -85,6 +386,13 @@ export class SmsService {
     options: SendSmsOptions,
   ): Promise<ThreadEventEntity> {
     const { type, authorName, journeyStepName } = options;
+    if (
+      type === ThreadEventType.AUTOMATED_OUTBOUND &&
+      process.env.MOBILEMESSAGE_TEST_RECIPIENT
+    )
+      throw new BadRequestException(
+        'Automated SMS is paused during one-way handset testing',
+      );
     const latest = await this.store.findProspectById(options.prospect.id);
     if (!latest) throw new NotFoundException('Prospect not found');
     const prospect = {
@@ -121,9 +429,27 @@ export class SmsService {
       );
     }
 
-    const rooftop = this.store.getRooftopById(prospect.rooftopId);
+    let rooftop = this.store.getRooftopById(prospect.rooftopId);
     if (!rooftop)
       throw new NotFoundException(`Rooftop not found: ${prospect.rooftopId}`);
+    if (process.env.MOBILEMESSAGE_TEST_RECIPIENT) {
+      const allowed = PhoneNormalizer.normalizeAustralianPhone(
+        process.env.MOBILEMESSAGE_TEST_RECIPIENT,
+      ).normalized;
+      if (!allowed || prospect.normalizedMobile !== allowed)
+        throw new BadRequestException(
+          'SMS test mode only allows the configured test recipient',
+        );
+      if (
+        prospect.rooftopId !== RooftopId.CRANBOURNE_KIA ||
+        !process.env.SMS_KIA_NUMBER
+      )
+        throw new BadRequestException(
+          'This one-number SMS test is configured for Cranbourne Kia only',
+        );
+      // Use the explicitly configured test sender, rather than a historical saved number.
+      rooftop = { ...rooftop, senderPhone: process.env.SMS_KIA_NUMBER };
+    }
     const content = compliantMessage(options.content, rooftop);
     // Pause before dispatch so a scheduler cannot speak over a staff send.
     if (type === ThreadEventType.STAFF_OUTBOUND)
@@ -136,35 +462,31 @@ export class SmsService {
         },
       });
 
-    let externalSid: string | undefined;
-    let initialStatus = DeliveryStatus.DELIVERED;
+    let initialStatus = DeliveryStatus.PENDING;
     let failureReason: string | undefined;
 
-    // Dispatch via real Twilio if credentials configured
-    if (this.twilioClient) {
-      try {
-        const message = await this.twilioClient.messages.create({
-          body: content,
-          from: rooftop.senderPhone,
-          to: prospect.normalizedMobile,
-          statusCallback: process.env.TWILIO_STATUS_CALLBACK_URL || undefined,
-        });
-        externalSid = message.sid;
-        initialStatus = DeliveryStatus.PENDING;
-        this.logger.log(
-          `Twilio message created [SID: ${message.sid}] status: ${message.status}`,
-        );
-      } catch (twilioErr: any) {
-        this.logger.error(
-          `Twilio send failed to ${prospect.normalizedMobile}: ${twilioErr.message}`,
-          twilioErr.stack,
-        );
-        initialStatus = DeliveryStatus.FAILED;
-        failureReason = twilioErr.message || 'Carrier rejected the message';
-      }
-    }
-
-    const eventId = `evt_${randomUUID()}`;
+    const eventId =
+      type === ThreadEventType.AUTOMATED_OUTBOUND
+        ? `evt_auto_${createHash('sha256')
+            .update(
+              JSON.stringify([
+                prospect.id,
+                prospect.journey.startedAt,
+                prospect.journey.versionId,
+                prospect.journey.currentStep,
+              ]),
+            )
+            .digest('hex')}`
+        : `evt_${randomUUID()}`;
+    const previous = await this.store.smsEvent(eventId);
+    const outstanding = await this.store.recordList('sms_outbox', {
+      'data.prospectId': prospect.id,
+      'data.state': { $in: ['pending', 'review'] },
+    });
+    if (outstanding.some((record) => record.key !== eventId))
+      throw new ConflictException(
+        'A previous SMS is awaiting provider acceptance or manual reconciliation',
+      );
     const event: ThreadEventEntity = {
       id: eventId,
       prospectId: prospect.id,
@@ -180,18 +502,46 @@ export class SmsService {
         from: rooftop.senderPhone,
         to: prospect.normalizedMobile,
         rooftopName: rooftop.name,
-        twilioMessageSid: externalSid,
-        simulated: !this.twilioClient,
+        provider: 'mobilemessage',
+        customRef: eventId,
         authorId: options.authorId,
         journeyVersionId: prospect.journey.versionId,
         journeyVersion: prospect.journey.version,
       },
     };
 
-    await this.store.addEvent(event);
-    this.logger.log(
-      `[SMS OUT] ${rooftop.name} -> ${prospect.normalizedMobile} (${type}): "${content}"`,
-    );
+    const existingJob = await this.store.recordGet('sms_outbox', eventId);
+    const persisted = previous ?? existingJob?.data.event ?? event;
+    const job = {
+      eventId,
+      prospectId: prospect.id,
+      createdAt: Date.now(),
+      attempts: 0,
+      state: 'pending',
+      event: persisted,
+      key: eventId,
+      payload: {
+        messages: [
+          {
+            to: persisted.metadata?.to,
+            sender: persisted.metadata?.from,
+            message: persisted.content,
+            custom_ref: eventId,
+          },
+        ],
+        enable_unicode: true,
+      },
+    };
+    await this.store.recordInsert('sms_outbox', eventId, job);
+    await this.store.addEvent(persisted);
+    await this.deliverJob(eventId);
+    const savedEvent = await this.store.smsEvent(eventId);
+    initialStatus = savedEvent?.deliveryStatus ?? DeliveryStatus.PENDING;
+    failureReason = savedEvent?.failureReason;
+    event.deliveryStatus = initialStatus;
+    event.failureReason = failureReason;
+    event.metadata = savedEvent?.metadata ?? event.metadata;
+    if (previous || existingJob) return savedEvent ?? persisted;
 
     // Staff send → pause automated journey (Scope §7.2)
     if (type === ThreadEventType.STAFF_OUTBOUND) {
@@ -222,18 +572,20 @@ export class SmsService {
       });
     }
 
-    await this.writebackService.queueWriteback(
-      prospect.id,
-      prospect.dealerSocketOpportunityId,
-      initialStatus === DeliveryStatus.FAILED
-        ? 'sms_failed'
-        : type === ThreadEventType.STAFF_OUTBOUND
-          ? 'staff_sms_sent'
-          : (prospect.journey.currentStep ?? 0) === 0
-            ? 'journey_started'
-            : 'automated_sms_sent',
-      `${event.timestamp.toISOString()} | ${authorName || journeyStepName || 'Automation'} | ${content}`,
-    );
+    // Handset test conversations must not queue activity against a real CRM.
+    if (!process.env.MOBILEMESSAGE_TEST_RECIPIENT)
+      await this.writebackService.queueWriteback(
+        prospect.id,
+        prospect.dealerSocketOpportunityId,
+        initialStatus === DeliveryStatus.FAILED
+          ? 'sms_failed'
+          : type === ThreadEventType.STAFF_OUTBOUND
+            ? 'staff_sms_sent'
+            : (prospect.journey.currentStep ?? 0) === 0
+              ? 'journey_started'
+              : 'automated_sms_sent',
+        `${event.timestamp.toISOString()} | ${authorName || journeyStepName || 'Automation'} | ${content}`,
+      );
     return event;
   }
 
@@ -243,6 +595,11 @@ export class SmsService {
     body: string,
     mediaUrls?: string[],
     messageId?: string,
+    correlation?: string,
+    receivedAt?: Date,
+    forceOptOut = false,
+    resumeProcessing = false,
+    suppressionAlreadyApplied = false,
   ) {
     const normFrom = PhoneNormalizer.normalizeAustralianPhone(from);
     if (!normFrom.isValid || !normFrom.normalized) {
@@ -250,21 +607,31 @@ export class SmsService {
     }
 
     await this.store.refreshRooftops();
-    const targetRooftop = this.store.getRooftopBySenderPhone(to);
+    const targetRooftop = this.store.getRooftopBySenderPhone(
+      PhoneNormalizer.normalizeAustralianPhone(to).normalized || to,
+    );
     if (!targetRooftop)
       throw new BadRequestException('Unknown receiving rooftop number');
     const rooftopId = targetRooftop.id;
-    const prospect = await this.store.latestProspectForMobile(
-      normFrom.normalized,
-      rooftopId,
-    );
-    const isOptOut = PhoneNormalizer.isOptOutKeyword(body);
+    const outbound = correlation
+      ? await this.store.smsEvent(correlation)
+      : null;
+    const correlated = outbound
+      ? await this.store.findProspectById(outbound.prospectId)
+      : null;
+    const prospect =
+      correlated?.normalizedMobile === normFrom.normalized &&
+      correlated.rooftopId === rooftopId
+        ? correlated
+        : await this.store.unambiguousProspect(normFrom.normalized, rooftopId);
+    const isOptOut = forceOptOut || PhoneNormalizer.isOptOutKeyword(body);
     if (!prospect && isOptOut) {
-      await this.complianceService.addSuppression(
-        normFrom.normalized,
-        'Unmatched customer STOP',
-        'keyword_opt_out',
-      );
+      if (!suppressionAlreadyApplied)
+        await this.complianceService.addSuppression(
+          normFrom.normalized,
+          'Unmatched customer STOP',
+          'keyword_opt_out',
+        );
       await this.store.audit('unmatched_opt_out', undefined, {
         mobile: normFrom.normalized,
         rooftopId,
@@ -281,11 +648,12 @@ export class SmsService {
 
     if (messageId && !(await this.store.claimCarrierMessage(messageId))) {
       const record = await this.store.recordGet('carrier_message', messageId);
-      if (record?.data.state !== 'done')
+      if (record?.data.state === 'done')
+        return { duplicate: true, event: null, isOptOut };
+      if (!resumeProcessing)
         throw new ConflictException(
           'Carrier message is being processed; retry',
         );
-      return { duplicate: true, event: null, isOptOut };
     }
     const key = `prospect:${prospect.id}`;
     const owner = await this.store.lease(key, 120);
@@ -299,11 +667,12 @@ export class SmsService {
       if (current) prospect.journey = current.journey;
 
       if (isOptOut) {
-        await this.complianceService.addSuppression(
-          normFrom.normalized,
-          `Opt-out keyword received: ${body.trim()}`,
-          'keyword_opt_out',
-        );
+        if (!suppressionAlreadyApplied)
+          await this.complianceService.addSuppression(
+            normFrom.normalized,
+            `Opt-out keyword received: ${body.trim()}`,
+            'keyword_opt_out',
+          );
 
         const inboundEvent: ThreadEventEntity = {
           id: `evt_in_${messageId ? createHash('sha256').update(messageId).digest('hex') : randomUUID()}`,
@@ -312,13 +681,13 @@ export class SmsService {
           direction: 'inbound',
           content: body,
           mediaUrls,
-          timestamp: new Date(),
+          timestamp: receivedAt ?? new Date(),
           metadata: { carrierMessageId: messageId },
         };
         await this.store.addEvent(inboundEvent);
 
         await this.store.addEvent({
-          id: `sys_${randomUUID()}`,
+          id: messageId ? `sys_stop_${inboundEvent.id}` : `sys_${randomUUID()}`,
           prospectId: prospect.id,
           type: ThreadEventType.SYSTEM,
           direction: 'internal',
@@ -357,7 +726,7 @@ export class SmsService {
         direction: 'inbound',
         content: body,
         mediaUrls,
-        timestamp: new Date(),
+        timestamp: receivedAt ?? new Date(),
         metadata: { carrierMessageId: messageId },
       };
       await this.store.addEvent(inboundEvent);
@@ -378,7 +747,7 @@ export class SmsService {
       });
 
       await this.store.addEvent({
-        id: `sys_${randomUUID()}`,
+        id: messageId ? `sys_reply_${inboundEvent.id}` : `sys_${randomUUID()}`,
         prospectId: prospect.id,
         type: ThreadEventType.SYSTEM,
         direction: 'internal',
@@ -395,6 +764,7 @@ export class SmsService {
       await this.store.notifyOwner(
         prospect,
         'A customer reply is waiting for your response.',
+        inboundEvent.id,
       );
       if (messageId)
         await this.store.recordSave('carrier_message', messageId, {
@@ -421,45 +791,15 @@ export class SmsService {
       throw new ConflictException('Opt-out confirmation is in progress; retry');
     try {
       if (await this.store.recordGet('optout_confirmation', mobile)) return;
-      const content = `${rooftop.name}: You have successfully unsubscribed. No further commercial messages will be sent.`;
-      let sid: string | undefined;
-      let failure: string | undefined;
-      try {
-        if (this.twilioClient)
-          sid = (
-            await this.twilioClient.messages.create({
-              body: content,
-              from: rooftop.senderPhone,
-              to: mobile,
-              statusCallback:
-                process.env.TWILIO_STATUS_CALLBACK_URL || undefined,
-            })
-          ).sid;
-      } catch (error: any) {
-        failure = error.message;
-      }
+      // Configure a single provider unsubscribe confirmation rule. Never bypass provider suppression
+      // to send a second commercial/confirmation SMS after a STOP.
       await this.store.recordSave('optout_confirmation', mobile, {
         timestamp: new Date(),
-        failureReason: failure,
-        simulated: !this.twilioClient,
+        handling: 'provider_rule_required',
+        confirmationDelivery: 'not_verified',
+        prospectId,
+        rooftopId: rooftop.id,
       });
-      if (prospectId)
-        await this.store.addEvent({
-          id: `evt_${randomUUID()}`,
-          prospectId,
-          type: ThreadEventType.AUTOMATED_OUTBOUND,
-          direction: 'outbound',
-          content,
-          journeyStepName: 'Opt-out Confirmation',
-          deliveryStatus: failure
-            ? DeliveryStatus.FAILED
-            : sid
-              ? DeliveryStatus.PENDING
-              : DeliveryStatus.DELIVERED,
-          failureReason: failure,
-          timestamp: new Date(),
-          metadata: { twilioMessageSid: sid, simulated: !this.twilioClient },
-        });
     } finally {
       await this.store.releaseLease(key, owner);
     }

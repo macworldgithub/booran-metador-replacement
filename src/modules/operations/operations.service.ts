@@ -81,9 +81,14 @@ export class OperationsService implements OnModuleInit {
     }
   }
   async journeys(user: PortalActor, rooftopId?: RooftopId) {
-    return this.store.recordList('journey', {
+    const records = await this.store.recordList('journey', {
       'data.rooftopId': { $in: this.scope(user, rooftopId) },
     });
+    return Promise.all(records.map(async (record) => {
+      const active = await this.store.recordGet('journey_active', `${record.data.rooftopId}:${record.data.leadType}`);
+      return { ...record, data: { ...record.data, isCurrent: active?.data.id === record.key,
+        enabled: active?.data.id === record.key ? active.data.enabled === true : false } };
+    }));
   }
   validateSteps(dto: JourneyDraftDto) {
     if (dto.steps[0].delayType !== 'immediate')
@@ -312,9 +317,10 @@ export class OperationsService implements OnModuleInit {
       throw new BadRequestException('from must not be after to');
     const ids = this.scope(user, query.rooftopId);
     const prospects = await this.store.queryProspects({ rooftopIds: ids });
+    const production = prospects.filter(p => !p.id.startsWith('sms_test_') && !/^SMS-TEST-/i.test(p.dealerSocketOpportunityId));
     const filtered = audit
       ? prospects
-      : prospects.filter(
+      : production.filter(
           (p) =>
             (!query.from ||
               new Date(p.receivedAt ?? p.createdAt) >= new Date(query.from)) &&
@@ -335,8 +341,37 @@ export class OperationsService implements OnModuleInit {
             ?.rooftopId,
         })),
       };
+    const timeline = await this.store.performanceEvents(filtered.map(p => p.id));
+    const median = (values: number[]) => {
+      const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      return sorted.length ? sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2 : null;
+    };
+    const firstDelay = (p: typeof filtered[number]) => {
+      const first = events.find(e => e.prospectId === p.id && e.type === 'automated_outbound'
+        && e.metadata?.providerAcceptedAt);
+      return first ? Math.max(0, (new Date(first.metadata!.providerAcceptedAt).getTime() - new Date(p.receivedAt ?? p.createdAt).getTime()) / 1000) : null;
+    };
+    const day = (value: Date | string) => new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Australia/Melbourne', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date(value));
+    const daily = new Map<string, { date: string; leads: number; replies: number }>();
+    for (const p of filtered) {
+      const date = day(p.receivedAt ?? p.createdAt);
+      const row = daily.get(date) ?? { date, leads: 0, replies: 0 };
+      row.leads++; daily.set(date, row);
+    }
+    for (const event of timeline.filter(e => e.type === 'customer_inbound')) {
+      if (query.from && new Date(event.timestamp) < new Date(query.from) || query.to && new Date(event.timestamp) > new Date(query.to)) continue;
+      const date = day(event.timestamp);
+      const row = daily.get(date) ?? { date, leads: 0, replies: 0 };
+      row.replies++; daily.set(date, row);
+    }
     return {
       generatedAt: new Date(),
+      excludedTestRecords: prospects.length - production.length,
+      medianFirstSmsSeconds: median(filtered.map(firstDelay).filter((v): v is number => v !== null)),
+      daily: [...daily.values()].sort((a, b) => a.date.localeCompare(b.date)),
       rooftops: ids.map((id) => {
         const leads = filtered.filter((p) => p.rooftopId === id);
         const outcomes = Object.fromEntries(
@@ -348,19 +383,7 @@ export class OperationsService implements OnModuleInit {
           ),
         );
         const firstTimes = leads
-          .map((p) => {
-            const first = events.find(
-              (e) => e.prospectId === p.id && e.type === 'automated_outbound',
-            );
-            return first
-              ? Math.max(
-                  0,
-                  (new Date(first.timestamp).getTime() -
-                    new Date(p.receivedAt ?? p.createdAt).getTime()) /
-                    1000,
-                )
-              : null;
-          })
+          .map(firstDelay)
           .filter((n): n is number => n !== null)
           .sort((a, b) => a - b);
         return {
@@ -383,6 +406,7 @@ export class OperationsService implements OnModuleInit {
               e.deliveryStatus === 'failed',
           ).length,
           outcomes,
+          optedOut: leads.filter(p => p.status === 'opted_out').length,
         };
       }),
     };

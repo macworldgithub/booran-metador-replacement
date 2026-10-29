@@ -25,6 +25,10 @@ import { RolesGuard } from '../src/modules/auth/guards/roles.guard';
 import { ConversationsController } from '../src/modules/conversations/conversations.controller';
 import { ConversationsService } from '../src/modules/conversations/conversations.service';
 import { StoreService } from '../src/modules/database/store.service';
+import {
+  MobileMessageService,
+  MobileMessageError,
+} from '../src/modules/sms/mobile-message.service';
 import { SmsService } from '../src/modules/sms/sms.service';
 import { JourneyService } from '../src/modules/journey/journey.service';
 import { ComplianceService } from '../src/modules/compliance/compliance.service';
@@ -61,9 +65,8 @@ suite('Conversation portal: HTTP, JWT, services and isolated MongoDB', () => {
   let expired: string;
   let userModel: Model<User>;
   const savedEnvironment = {
+    MOBILEMESSAGE_TEST_RECIPIENT: process.env.MOBILEMESSAGE_TEST_RECIPIENT,
     JWT_SECRET: process.env.JWT_SECRET,
-    TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID,
-    TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN,
     DS_CLIENT_ID: process.env.DS_CLIENT_ID,
     DS_CLIENT_SECRET: process.env.DS_CLIENT_SECRET,
   };
@@ -71,11 +74,10 @@ suite('Conversation portal: HTTP, JWT, services and isolated MongoDB', () => {
     process.env.PORTAL_E2E_DB ||
     `portal_e2e_${Date.now()}_${randomUUID().slice(0, 8)}`;
   beforeAll(async () => {
+    delete process.env.MOBILEMESSAGE_TEST_RECIPIENT;
     if (!/^portal_e2e_[a-zA-Z0-9_]+$/.test(dbName))
       throw new Error('Use an isolated portal_e2e_ database only');
     process.env.JWT_SECRET = 'conversation-test-only';
-    process.env.TWILIO_ACCOUNT_SID = '';
-    process.env.TWILIO_AUTH_TOKEN = '';
     process.env.DS_CLIENT_ID = '';
     process.env.DS_CLIENT_SECRET = '';
     const module = await Test.createTestingModule({
@@ -104,6 +106,10 @@ suite('Conversation portal: HTTP, JWT, services and isolated MongoDB', () => {
         StoreService,
         ConversationsService,
         SmsService,
+        {
+          provide: MobileMessageService,
+          useValue: { send: jest.fn(async () => randomUUID()) },
+        },
         JourneyService,
         ComplianceService,
         WritebackService,
@@ -300,7 +306,8 @@ suite('Conversation portal: HTTP, JWT, services and isolated MongoDB', () => {
     expect(sent.body.authorName).toBe('Portal Staff');
     expect(sent.body.content).toContain('Cranbourne Kia');
     expect(sent.body.content).toContain('Reply STOP');
-    expect(sent.body.metadata.simulated).toBe(true);
+    expect(sent.body.metadata.provider).toBe('mobilemessage');
+    expect(sent.body.deliveryStatus).toBe('pending');
     const thread = await get(`/api/prospects/${id}/thread`).expect(200);
     expect(thread.body.prospect.journey.status).toBe('paused');
     expect(thread.body.events.some((e: any) => e.id === sent.body.id)).toBe(
@@ -407,13 +414,10 @@ suite('Conversation portal: HTTP, JWT, services and isolated MongoDB', () => {
     await patch('outcome', { outcome: 'not_interested' }).expect(400);
   });
   it('carrier failures remain visible and a retry appends a new message', async () => {
-    (sms as any).twilioClient = {
-      messages: {
-        create: async () => {
-          throw new Error('Carrier test rejection');
-        },
-      },
-    };
+    const provider = (sms as any).provider;
+    provider.send.mockRejectedValueOnce(
+      new MobileMessageError('Carrier test rejection'),
+    );
     try {
       const failure = await post('messages', {
         content: 'Failure test',
@@ -421,12 +425,12 @@ suite('Conversation portal: HTTP, JWT, services and isolated MongoDB', () => {
       expect(failure.body.deliveryStatus).toBe('failed');
       expect(failure.body.failureReason).toBe('Carrier test rejection');
     } finally {
-      (sms as any).twilioClient = undefined;
+      provider.send.mockImplementation(async () => randomUUID());
     }
     const retry = await post('messages', { content: 'Failure test' }).expect(
       201,
     );
-    expect(retry.body.deliveryStatus).toBe('delivered');
+    expect(retry.body.deliveryStatus).toBe('pending');
     const thread = await get(`/api/prospects/${id}/thread`).expect(200);
     expect(
       thread.body.events.filter((e: any) => e.type === 'staff_outbound'),

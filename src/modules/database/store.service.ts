@@ -51,8 +51,8 @@ export class StoreService {
         id: RooftopId.CRANBOURNE_KIA,
         name: 'Cranbourne Kia',
         address: '209 South Gippsland Hwy, Cranbourne VIC 3977',
-        senderPhone: process.env.TWILIO_KIA_NUMBER || '+61488800209',
-        displayPhone: '(03) 5995 0000',
+        senderPhone: process.env.SMS_KIA_NUMBER || '',
+        displayPhone: '',
         sendHours: { start: '09:00', end: '20:00' },
         closedDays: ['Sunday'],
       },
@@ -60,8 +60,8 @@ export class StoreService {
         id: RooftopId.CRANBOURNE_MG,
         name: 'Cranbourne MG',
         address: '215 South Gippsland Hwy, Cranbourne VIC 3977',
-        senderPhone: process.env.TWILIO_MG_NUMBER || '+61488800215',
-        displayPhone: '(03) 5995 1111',
+        senderPhone: process.env.SMS_MG_NUMBER || '',
+        displayPhone: '',
         sendHours: { start: '09:00', end: '20:00' },
         closedDays: ['Sunday'],
       },
@@ -69,8 +69,8 @@ export class StoreService {
         id: RooftopId.GEELY_CRANBOURNE,
         name: 'Geely Cranbourne',
         address: '217A South Gippsland Hwy, Cranbourne VIC 3977',
-        senderPhone: process.env.TWILIO_GEELY_NUMBER || '+61488800217',
-        displayPhone: '(03) 5995 2222',
+        senderPhone: process.env.SMS_GEELY_NUMBER || '',
+        displayPhone: '',
         sendHours: { start: '09:00', end: '20:00' },
         closedDays: ['Sunday'],
       },
@@ -344,7 +344,11 @@ export class StoreService {
     const doc = await this.threadEventModel
       .findOneAndUpdate(
         {
-          $or: [{ id: eventId }, { 'metadata.twilioMessageSid': eventId }],
+          $or: [
+            { id: eventId },
+            { 'metadata.providerMessageId': eventId },
+            { 'metadata.twilioMessageSid': eventId },
+          ],
           ...(status === DeliveryStatus.PENDING
             ? {
                 deliveryStatus: {
@@ -362,7 +366,11 @@ export class StoreService {
     if (doc) return this.toEntity<ThreadEventEntity>(doc);
     const current = await this.threadEventModel
       .findOne({
-        $or: [{ id: eventId }, { 'metadata.twilioMessageSid': eventId }],
+        $or: [
+          { id: eventId },
+          { 'metadata.providerMessageId': eventId },
+          { 'metadata.twilioMessageSid': eventId },
+        ],
       })
       .lean();
     return current ? this.toEntity<ThreadEventEntity>(current) : null;
@@ -458,6 +466,14 @@ export class StoreService {
       .find({ kind: 'rooftop' })
       .toArray())
       this.rooftops.set(record.key, record.data);
+    // Old seed phone numbers are examples, not verified sender identities.
+    const examples = new Set(['+61488800209', '+61488800215', '+61488800217']);
+    const contacts = new Set(['(03) 5995 0000', '(03) 5995 1111', '(03) 5995 2222']);
+    for (const rooftop of this.rooftops.values()) {
+      const configured = process.env[({ cranbourne_kia: 'SMS_KIA_NUMBER', cranbourne_mg: 'SMS_MG_NUMBER', geely_cranbourne: 'SMS_GEELY_NUMBER' })[rooftop.id]];
+      if (examples.has(rooftop.senderPhone) && configured !== rooftop.senderPhone) rooftop.senderPhone = configured || '';
+      if (contacts.has(rooftop.displayPhone)) rooftop.displayPhone = '';
+    }
   }
   async recordList(kind: string, filter: Record<string, any> = {}) {
     const records = await this.records()
@@ -480,6 +496,31 @@ export class StoreService {
       { upsert: true },
     );
     return this.recordGet(kind, key);
+  }
+  async recordInsert(kind: string, key: string, data: any) {
+    await this.records().updateOne(
+      { kind, key },
+      { $setOnInsert: { data, createdAt: new Date() } },
+      { upsert: true },
+    );
+  }
+  async smsEvent(reference: string) {
+    const doc = await this.threadEventModel
+      .findOne({
+        $or: [{ id: reference }, { 'metadata.providerMessageId': reference }],
+      })
+      .lean();
+    return doc ? this.toEntity<ThreadEventEntity>(doc) : null;
+  }
+  async patchSmsEvent(id: string, patch: Record<string, any>) {
+    await this.threadEventModel.updateOne({ id }, { $set: patch });
+  }
+  async unambiguousProspect(mobile: string, rooftopId: RooftopId) {
+    const docs = await this.prospectModel
+      .find({ normalizedMobile: mobile, rooftopId })
+      .limit(2)
+      .lean();
+    return docs.length === 1 ? this.toEntity<ProspectEntity>(docs[0]) : null;
   }
   async recordDelete(kind: string, key: string) {
     return (await this.records().deleteOne({ kind, key })).deletedCount > 0;
@@ -582,8 +623,12 @@ export class StoreService {
       status: 'open',
     });
   }
-  async notifyOwner(prospect: ProspectEntity, content: string) {
-    return this.recordSave('notification', randomUUID(), {
+  async notifyOwner(
+    prospect: ProspectEntity,
+    content: string,
+    eventKey?: string,
+  ) {
+    return this.recordSave('notification', eventKey ?? randomUUID(), {
       prospectId: prospect.id,
       rooftopId: prospect.rooftopId,
       owner: prospect.assignedTo,
@@ -611,6 +656,11 @@ export class StoreService {
       .sort({ timestamp: 1, _id: 1 })
       .lean();
     return docs.map((doc) => this.toEntity<ThreadEventEntity>(doc));
+  }
+  async performanceEvents(ids: string[]) {
+    const docs = await this.threadEventModel.find({ prospectId: { $in: ids }, type: 'customer_inbound' })
+      .sort({ timestamp: 1, _id: 1 }).lean();
+    return docs.map(doc => this.toEntity<ThreadEventEntity>(doc));
   }
   async suppressMobileJourneys(mobile: string) {
     const records = await this.prospectModel

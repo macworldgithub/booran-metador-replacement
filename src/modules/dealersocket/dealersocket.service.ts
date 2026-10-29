@@ -47,9 +47,9 @@ export function sanitizeConnection(value: unknown): ConnectionStatus {
 export class DealerSocketService {
   constructor(private readonly store: StoreService) {}
 
-  async request(action: 'status' | 'check' | 'login/start', actor?: PortalActor): Promise<ConnectionStatus>;
+  async request(action: 'status' | 'check' | 'login/start' | 'login/automatic/start', actor?: PortalActor): Promise<ConnectionStatus>;
   async request(action: 'leads/status' | 'leads/read', actor: PortalActor): Promise<ReturnType<typeof sanitizeLiveLeads>>;
-  async request(action: 'status' | 'check' | 'login/start' | 'leads/status' | 'leads/read', actor?: PortalActor) {
+  async request(action: 'status' | 'check' | 'login/start' | 'login/automatic/start' | 'leads/status' | 'leads/read', actor?: PortalActor) {
     const base = process.env.DEALERSOCKET_CONNECTOR_URL || 'http://127.0.0.1:8000';
     const key = process.env.DEALERSOCKET_CONNECTOR_KEY || '';
     if (key.length < 32) throw new ServiceUnavailableException('DealerSocket connector is not configured');

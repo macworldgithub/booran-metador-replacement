@@ -27,6 +27,11 @@ export class DealerSocketController {
   @ApiOperation({ summary: 'Open the dedicated login browser on the automation PC; complete MFA there' })
   login(@CurrentUser() actor: PortalActor) { return this.service.request('login/start', actor); }
 
+  @Post('login/automatic/start')
+  @HttpCode(202)
+  @ApiOperation({ summary: 'Open Chrome and complete normal password/TOTP login using server credentials' })
+  automaticLogin(@CurrentUser() actor: PortalActor) { return this.service.request('login/automatic/start', actor); }
+
   @Get('leads/status')
   @Roles(UserRole.GROUP_ADMIN, UserRole.SALES_MANAGER, UserRole.BDC, UserRole.SALESPERSON, UserRole.READ_ONLY)
   @ApiOperation({ summary: 'Read a rooftop/owner-scoped live DealerSocket snapshot; no lead enrollment or messaging' })

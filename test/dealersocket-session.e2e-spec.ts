@@ -77,6 +77,14 @@ describe('DealerSocket session API (offline; no browser/database)', () => {
     await request(app.getHttpServer()).get('/api/integrations/dealersocket/heartbeat/status').set('x-test-role', 'salesperson').expect(403);
     expect(upstream).toHaveBeenCalledTimes(1);
   });
+  it('allows only admins to open visible automatic login and audits the action', async () => {
+    const upstream = jest.spyOn(axios, 'request').mockResolvedValue({ data: snapshot });
+    await request(app.getHttpServer()).post('/api/integrations/dealersocket/login/automatic/start').set('x-test-role', 'salesperson').expect(403);
+    expect(upstream).not.toHaveBeenCalled();
+    await request(app.getHttpServer()).post('/api/integrations/dealersocket/login/automatic/start').set('x-test-role', 'group_admin').expect(202);
+    expect(upstream).toHaveBeenCalledWith(expect.objectContaining({ method: 'POST', url: expect.stringContaining('/dealersocket/login/automatic/start') }));
+    expect(audit).toHaveBeenCalledWith('dealersocket_session_requested', expect.any(Object), { action: 'login/automatic/start' });
+  });
   it('accepts lead-read activity without rewriting verification timestamps', async () => {
     const reading = {...snapshot,state:'connecting',operation:'read',message:'Lead read in progress. Session checks resume when it finishes.',
       rooftops:snapshot.rooftops.map(roof=>({...roof,verified:false}))};

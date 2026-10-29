@@ -5,8 +5,7 @@ import {
   UnauthorizedException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { timingSafeEqual } from 'crypto';
-import twilio = require('twilio');
+import { timingSafeEqual, createHmac } from 'crypto';
 
 function equals(actual: unknown, expected: string) {
   if (typeof actual !== 'string') return false;
@@ -42,19 +41,30 @@ export class WebhookGuard implements CanActivate {
         equals(request.headers['x-webhook-test-token'], sandboxToken)
       )
         return true;
-      const authToken = process.env.TWILIO_AUTH_TOKEN;
-      const base = process.env.WEBHOOK_PUBLIC_BASE_URL;
-      if (!authToken || !base)
+      const secret = process.env.MOBILEMESSAGE_WEBHOOK_SECRET;
+      if (!secret)
         throw new ServiceUnavailableException(
-          'Carrier webhook signature verification is not configured',
+          'Mobile Message webhook signing is not configured',
         );
-      const signature = request.headers['x-twilio-signature'];
-      const url = `${base.replace(/\/$/, '')}${request.originalUrl}`;
+      const timestamp = request.headers['x-mm-timestamp'];
+      const signature = request.headers['x-mm-signature'];
       if (
+        typeof timestamp !== 'string' ||
+        !/^\d+$/.test(timestamp) ||
+        Math.abs(Date.now() / 1000 - Number(timestamp)) > 300 ||
         typeof signature !== 'string' ||
-        !twilio.validateRequest(authToken, signature, url, request.body ?? {})
+        !/^[a-f0-9]{64}$/.test(signature) ||
+        !Buffer.isBuffer(request.rawBody)
       )
-        throw new UnauthorizedException('Invalid carrier signature');
+        throw new UnauthorizedException(
+          'Invalid Mobile Message signature or timestamp',
+        );
+      const expected = createHmac('sha256', secret)
+        .update(timestamp + '.')
+        .update(request.rawBody)
+        .digest('hex');
+      if (!equals(signature, expected))
+        throw new UnauthorizedException('Invalid Mobile Message signature');
     }
     return true;
   }
