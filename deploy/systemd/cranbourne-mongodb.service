@@ -1,0 +1,25 @@
+[Unit]
+Description=Private MongoDB instance for Cranbourne
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=mongodb
+Group=mongodb
+ExecStart=/usr/bin/mongod --config /etc/cranbourne/mongod.conf
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=120
+StateDirectory=cranbourne-mongodb
+StateDirectoryMode=0700
+UMask=0077
+LimitNOFILE=64000
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cranbourne-mongodb
+
+[Install]
+WantedBy=multi-user.target
