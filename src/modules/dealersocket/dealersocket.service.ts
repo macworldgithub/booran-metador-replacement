@@ -50,7 +50,7 @@ export class DealerSocketService {
   async request(action: 'status' | 'check' | 'login/start' | 'login/automatic/start', actor?: PortalActor): Promise<ConnectionStatus>;
   async request(action: 'leads/status' | 'leads/read', actor: PortalActor): Promise<ReturnType<typeof sanitizeLiveLeads>>;
   async request(action: 'status' | 'check' | 'login/start' | 'login/automatic/start' | 'leads/status' | 'leads/read', actor?: PortalActor) {
-    const base = process.env.DEALERSOCKET_CONNECTOR_URL || 'http://127.0.0.1:8000';
+    const base = process.env.DEALERSOCKET_CONNECTOR_URL || 'https://cranbourne-automation.omnisuiteai.com';
     const key = process.env.DEALERSOCKET_CONNECTOR_KEY || '';
     if (key.length < 32) throw new ServiceUnavailableException('DealerSocket connector is not configured');
     // Configuration is server-side only. No user-supplied URLs, paths or credentials are accepted.

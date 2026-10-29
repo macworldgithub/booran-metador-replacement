@@ -25,7 +25,7 @@ async function handler(request: NextRequest, context: Context) {
     try { body = await request.json(); } catch { body = undefined; }
   }
 
-  const base = (process.env.API_BASE_URL || "http://localhost:3000/api").replace(/\\/$/, "");
+  const base = (process.env.API_BASE_URL || "https://www.cranbourne-backend.omnisuiteai.com/api").replace(/\\/$/, "");
   const target = new URL(\`\${base}/journeys\${path.length ? \`/\${path.join("/")}\` : ""}\`);
   const rooftopId = request.nextUrl.searchParams.get("rooftopId");
   if (rooftopId) target.searchParams.set("rooftopId", rooftopId);
@@ -63,7 +63,7 @@ export async function GET(request: NextRequest) {
   const token = request.cookies.get(sessionCookie)?.value;
   if (!token) return authResponse({ message: "Please sign in to continue." }, 401);
 
-  const base = (process.env.API_BASE_URL || "http://localhost:3000/api").replace(/\\/$/, "");
+  const base = (process.env.API_BASE_URL || "https://www.cranbourne-backend.omnisuiteai.com/api").replace(/\\/$/, "");
   const target = new URL(\`\${base}/reports/journey-performance\`);
   for (const p of ["rooftopId", "from", "to"]) {
     const v = request.nextUrl.searchParams.get(p);
@@ -100,7 +100,7 @@ async function handler(request: NextRequest, context: Context) {
   if (!token) return authResponse({ message: "Please sign in to continue." }, 401);
   if (request.method !== "GET" && !sameOrigin(request)) return authResponse({ message: "Request origin is not allowed." }, 403);
 
-  const base = (process.env.API_BASE_URL || "http://localhost:3000/api").replace(/\\/$/, "");
+  const base = (process.env.API_BASE_URL || "https://www.cranbourne-backend.omnisuiteai.com/api").replace(/\\/$/, "");
   const target = new URL(\`\${base}/writeback\${path.length ? \`/\${path.join("/")}\` : ""}\`);
   const status = request.nextUrl.searchParams.get("status");
   if (status) target.searchParams.set("status", status);
@@ -137,7 +137,7 @@ async function handler(request: NextRequest, context: Context) {
   if (!token) return authResponse({ message: "Please sign in to continue." }, 401);
   if (request.method !== "GET" && !sameOrigin(request)) return authResponse({ message: "Request origin is not allowed." }, 403);
 
-  const base = (process.env.API_BASE_URL || "http://localhost:3000/api").replace(/\\/$/, "");
+  const base = (process.env.API_BASE_URL || "https://www.cranbourne-backend.omnisuiteai.com/api").replace(/\\/$/, "");
   const target = new URL(\`\${base}/notifications\${path.length ? \`/\${path.join("/")}\` : ""}\`);
 
   try {
@@ -177,7 +177,7 @@ async function handler(request: NextRequest, context: Context) {
     try { body = await request.json(); } catch { body = undefined; }
   }
 
-  const base = (process.env.API_BASE_URL || "http://localhost:3000/api").replace(/\\/$/, "");
+  const base = (process.env.API_BASE_URL || "https://www.cranbourne-backend.omnisuiteai.com/api").replace(/\\/$/, "");
   const target = new URL(\`\${base}/rooftops\${path.length ? \`/\${path.join("/")}\` : ""}\`);
 
   try {
