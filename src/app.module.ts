@@ -12,8 +12,10 @@ import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
 import { OperationsModule } from './modules/operations/operations.module';
 import { DealerSocketModule } from './modules/dealersocket/dealersocket.module';
+import { HealthController } from './health.controller';
 
 @Module({
+  controllers: [HealthController],
   imports: [
     ScheduleModule.forRoot(),
     DatabaseModule,

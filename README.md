@@ -2,6 +2,10 @@
 
 See [SMS configuration, webhook setup and acceptance testing](docs/mobile-message.md). Outbound sending defaults to disabled; Twilio is no longer used.
 
+## Production VPS deployment and updates
+
+See [deployment and update instructions](deploy/README.md) for the shared PM2, systemd, Nginx and Certbot setup. This repository versions the shared deployment tools for both projects. Backend source updates deploy from `master`; the companion automation repository deploys from `main`.
+
 <p align="center">
   <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
 </p>

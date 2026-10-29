@@ -21,7 +21,18 @@ async function bootstrap() {
     rawBody: true,
   });
 
-  app.enableCors();
+  // Only the local Nginx proxy may supply forwarded client/protocol headers.
+  app.set('trust proxy', 'loopback');
+  app.disable('x-powered-by');
+  const origins = (process.env.CORS_ORIGINS || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  app.enableCors({
+    origin: origins.length ? origins : process.env.NODE_ENV !== 'production',
+    credentials: origins.length > 0,
+  });
+  app.enableShutdownHooks();
 
   // Support XML/ADF payloads
   app.use(express.text({ type: ['text/*', 'application/xml', '*/xml'] }));
@@ -104,12 +115,18 @@ async function bootstrap() {
     .addTag('Rooftops', 'Cranbourne Kia, MG, Geely Cranbourne identities')
     .build();
 
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('api/docs', app, document);
+  if (process.env.DOCS_ENABLED !== 'false') {
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup('api/docs', app, document);
+  }
 
   const port = process.env.PORT ?? 3000;
-  await app.listen(port);
+  await app.listen(port, process.env.HOST || '127.0.0.1');
   console.log(`\n🚀 Booran Matador Replacement API → http://localhost:${port}`);
   console.log(`📚 Swagger Docs → http://localhost:${port}/api/docs`);
 }
-bootstrap();
+bootstrap().catch((error: unknown) => {
+  // Avoid printing database URLs, credentials, or upstream response objects.
+  console.error('Application startup failed:', error instanceof Error ? error.name : 'UnknownError');
+  process.exit(1);
+});
