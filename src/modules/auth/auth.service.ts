@@ -127,16 +127,11 @@ export class AuthService implements OnModuleInit {
     const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '');
     const resetUrl = `${frontendUrl}/reset-password?token=${rawToken}`;
 
-    this.logger.log(
-      `\n========================================\nPASSWORD RESET LINK for ${user.email}:\n${resetUrl}\n========================================`,
-    );
-
-    // Send real email via SMTP
+    // Send email via SMTP
     await this.mailService.sendPasswordResetEmail(user.email, resetUrl, user.name);
 
     return {
       message: 'If an account exists with that email, a password reset link has been sent.',
-      previewResetUrl: process.env.NODE_ENV !== 'production' ? resetUrl : undefined,
     };
   }
 
