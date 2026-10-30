@@ -12,6 +12,7 @@ import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
 import { OperationsModule } from './modules/operations/operations.module';
 import { DealerSocketModule } from './modules/dealersocket/dealersocket.module';
+import { MailModule } from './modules/mail/mail.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -19,6 +20,7 @@ import { HealthController } from './health.controller';
   imports: [
     ScheduleModule.forRoot(),
     DatabaseModule,
+    MailModule,
     AuthModule,
     UsersModule,
     OperationsModule,
