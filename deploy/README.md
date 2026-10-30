@@ -56,6 +56,8 @@ The initial backend login is `BOOTSTRAP_ADMIN_EMAIL` and the generated `BOOTSTRA
 
 `backend.env` and `automation.env` are literal `KEY="value"` files read by the services, **not shell scripts**. Do not `source` them. Keep double quotes and escape embedded quotes/backslashes. The generated files survive deployments. The generator maintains matching connector/forwarding keys, ports and loopback URLs. Rotate the shared keys in `backend.env` and rerun deployment to synchronize them.
 
+The active backend's `.env` links to `/etc/cranbourne/backend.env`, keeping production settings outside release folders. For password-reset email, set `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` and `MESSAGE_TRANSPORT="smtp"` there. Set `FRONTEND_URL` to the public frontend origin so reset links point to the correct portal. Keep SMTP passwords out of Git.
+
 For a browser frontend on another origin, set `CORS_ORIGINS` in `backend.env` to a comma-separated list of its exact HTTPS origins, without trailing slashes. API documentation is disabled by default. Set `DOCS_ENABLED="true"` in the relevant environment file if you want `/api/docs` (NestJS) or `/docs` (Python) exposed.
 
 Fresh configurations start with SMS and CRM write-back disabled. Existing approved production settings are preserved. Configure the provider credentials, dedicated reply numbers and signing secret before setting `MOBILEMESSAGE_ENABLED="true"`; follow the backend's `docs/mobile-message.md`. Public callbacks are:
@@ -144,6 +146,14 @@ After HTTPS is working, normal updates use:
 ```bash
 sudo bash /var/www/cranbourne/deploy/update-from-git.sh
 ```
+
+To redeploy **only the backend**, preserving the running Python automation process, use:
+
+```bash
+sudo bash /var/www/cranbourne/deploy/redeploy-backend.sh
+```
+
+This pulls backend `master`, builds and tests it, and restarts only `cranbourne-backend` in PM2. The resulting release links to the existing automation directory. Keep that referenced release when cleaning older releases. It does not modify Nginx, TLS certificates or production environment values.
 
 The repositories currently support public HTTPS reads. If access becomes private, configure server read access or pass `BACKEND_REPO_URL` / `AUTOMATION_REPO_URL` with authorized SSH URLs. Never commit `.env` files, passwords, private keys or browser profiles.
 

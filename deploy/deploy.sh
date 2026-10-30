@@ -214,6 +214,7 @@ as_app "$RELEASE/automation/.venv/bin/python" -m pip freeze > "$RELEASE/python-r
 # Runtime accounts write only to their dedicated state and log directories.
 chown -R root:cranbourne "$RELEASE"
 chmod -R go-w "$RELEASE"
+ln -sfn /etc/cranbourne/backend.env "$RELEASE/backend/.env"
 
 log 'Installing startup services and switching to the new release'
 install -m 0644 /var/www/cranbourne/deploy/systemd/cranbourne-automation.service /etc/systemd/system/cranbourne-automation.service
