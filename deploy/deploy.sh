@@ -111,6 +111,10 @@ if [[ $(readlink -f "$SCRIPT_DIR") != /var/www/cranbourne/deploy ]]; then
 fi
 chown -R root:root /var/www/cranbourne/deploy
 chmod -R go-w /var/www/cranbourne/deploy
+# The Git updater uses a restrictive umask. Allow the service account to
+# traverse this directory and read the two files it executes or loads.
+chmod 0755 /var/www/cranbourne/deploy
+chmod 0644 /var/www/cranbourne/deploy/smoke_browser.py /var/www/cranbourne/deploy/ecosystem.config.cjs
 
 log 'Configuring isolated Node.js 24 LTS and PM2 without changing system Node'
 install -d -m 0755 /var/www/cranbourne/runtime
