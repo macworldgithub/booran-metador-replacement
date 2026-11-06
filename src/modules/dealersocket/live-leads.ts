@@ -90,7 +90,7 @@ export function sanitizeLiveLeads(value: unknown, actor: PortalActor): LiveLeadS
     startedAt: date(raw.startedAt), fetchedAt: date(raw.fetchedAt), completedAt: date(raw.completedAt),
     durationSeconds: count(raw.totalDurationSeconds) ?? count(raw.durationSeconds),
     progress: ['checking_session','opening_opportunities','reading_filter_catalog','reading_queue','reading_details'].includes(progress) ? progress : null,
-    errorCode: raw.state === 'error' ? (raw.code === 'login_required' ? 'login_required' : 'snapshot_unavailable') : null,
+    errorCode: raw.state === 'error' ? (['login_required', 'session_unavailable', 'read_timeout', 'read_cancelled', 'lead_read_failed'].includes(String(raw.code)) ? String(raw.code) : 'snapshot_unavailable') : null,
     readOnly: true, limited: raw.limited === true, records,
     rooftops: allowed.map(roof => ({ ...roof, recordCount: records.filter(row => row.rooftopId === roof.id).length,
       matchedCandidateCount: admin && finished && Array.isArray(raw.rooftops)

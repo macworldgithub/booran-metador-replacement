@@ -140,6 +140,16 @@ describe('DealerSocket session API (offline; no browser/database)', () => {
     expect(upstream).toHaveBeenLastCalledWith(expect.objectContaining({method:'POST',data:{maxRecords:1000,detailLimit:200}}));
     expect(audit).toHaveBeenCalledWith('dealersocket_snapshot_requested',expect.any(Object),{action:'leads/read'});
   });
+  it('preserves safe refresh failures and progress without upstream error details', () => {
+    const actor={id:'a',name:'Staff',email:'staff@example.test',role:UserRole.SALESPERSON,rooftopIds:[RooftopId.CRANBOURNE_KIA]};
+    for (const code of ['login_required','session_unavailable','read_timeout','read_cancelled','lead_read_failed']) {
+      const result=sanitizeLiveLeads({...rawLeads,state:'error',code,progress:{stage:'reading_details'},message:'secret diagnostic'},actor);
+      expect(result.errorCode).toBe(code);
+      expect(result.progress).toBe('reading_details');
+      expect(JSON.stringify(result)).not.toContain('secret diagnostic');
+    }
+    expect(sanitizeLiveLeads({...rawLeads,state:'error',code:'secret diagnostic'},actor).errorCode).toBe('snapshot_unavailable');
+  });
   it('denies empty rooftop scopes and rejects invalid live snapshot identities', () => {
     const actor={id:'a',name:'Staff',email:'staff@example.test',role:UserRole.SALESPERSON,rooftopIds:[] as RooftopId[]};
     expect(sanitizeLiveLeads(rawLeads,actor).records).toEqual([]);
